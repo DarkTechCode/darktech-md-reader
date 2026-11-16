@@ -15,9 +15,10 @@ DarkTechMD — быстрая читалка Markdown (замена MarkMello), 
 
 ```
 cargo build            # сборка (debug)
-cargo test             # тесты парсера (tests/parse_basic.rs)
+cargo test             # тесты: parse_basic + perf_smoke
+cargo test --release -- --ignored   # тяжёлый перф-тест 50 МБ (вручную)
 cargo run -- temp/demo.md                 # запуск с демо-файлом
-./target/x86_64-pc-windows-msvc/debug/darktech-md.exe temp/demo.md   # exe
+./target/x86_64-pc-windows-msvc/debug/darktech-md.exe temp/documentation.md  # exe
 ```
 
 `.cargo/config.toml` уже настроен: target `x86_64-pc-windows-msvc`, `+crt-static`.
@@ -177,6 +178,26 @@ watcher notify c debounce 300мс, баннер «файл недоступен�
 
 1. Прочитать этот файл и PLAN.md, `git log --oneline` для контекста.
 2. Сделать этап целиком: код → `cargo build` (0 warnings) → `cargo test` →
-   запуск exe для владельца (`run_in_background` с `temp/demo.md`) → правки по фидбеку.
-3. Коммит с русским сообщением («Этап N: …»).
-4. Обновить этот раздел статуса (что готово / что дальше) — он должен всегда отражать реальность.
+   запуск exe для владельца (`run_in_background`, `temp/documentation.md` и `temp/demo.md`)
+   → правки по фидбеку владельца (скриншоты делает владелец).
+3. **Завершение этапа (обязательно, каждый раз):**
+   - коммит с русским сообщением («Этап N: …»);
+   - обновить этот файл (разделы «Что готово», «Карта кода», «Следующий этап», хвосты);
+   - отметить этап ✅ в PLAN.md §8 (краткая сводка сделанного);
+   - удалить из `temp/` одноразовые файлы (генерённые большие .md, логи, диагностические
+     скрипты); оставлять только ручные файлы проверки (demo.md, documentation.md);
+   - обновить `bin/DarkTechMD.exe` копией свежей release-сборки;
+   - дать владельцу промпт для нового чата (контекст старого к этому моменту перегружен) —
+     шаблон ниже, подставить номер и название следующего этапа.
+4. Разделы статуса должны всегда отражать реальность.
+
+### Шаблон промпта для нового чата
+
+```
+Продолжи разработку DarkTechMD (D:\WebWork\darktech.ru\scripts\darktech-md-reader).
+Сначала целиком прочитай progress.md и PLAN.md в корне проекта, затем git log --oneline.
+Выполни следующий этап по progress.md (сейчас это этап N — <название>).
+После кода: cargo build (0 предупреждений), cargo test, запуск exe
+(temp/documentation.md и temp/demo.md) для визуальной проверки — скриншоты делаю я сам
+по твоей просьбе. Коммит после этапа и регламент завершения — по §7 progress.md.
+```

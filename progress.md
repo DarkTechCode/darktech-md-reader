@@ -99,6 +99,10 @@ assets/fonts/          *.ttf + OFL-*.txt
 - `Id::new`/`Ui::id()` deprecated: `ui.scope_id().with(...)`, `.id_salt(...)` у ScrollArea.
 - Временное состояние между кадрами: `ctx.data_mut(|d| d.get_temp/insert_temp(id, v))`.
 - Галка: не забыть `eframe = { default-features = false, features = ["glow","clipboard","links","default_fonts"] }`.
+- Статический CRT: rustflags живут в `.cargo/config.toml` в секции **[build]** (`rustflags = ["-C","target-feature=+crt-static"]`).
+  Секция `[rust]` НЕ существует — cargo молча игнорирует, exe требует VCRUNTIME140.dll (проверять:
+  `grep -ao "VCRUNTIME[0-9_]*\.dll" exe` — пусто = ок). Релизный exe складываем в `bin/DarkTechMD.exe` (вне git).
+- Release-сборка без окна консоли: `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` в main.rs.
 
 ## 5. Следующий этап — 1. Виртуализация (самый ответственный)
 

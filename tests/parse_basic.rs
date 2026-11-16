@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use darktech_md::md::anchors;
 use darktech_md::md::blocks::{BlockKind, ListMarker};
 use darktech_md::md::parser::parse;
 
@@ -142,4 +143,34 @@ fn code_block_keeps_text() {
 fn word_count() {
     let doc = parse(Arc::from("раз два три четыре\nпять\n"));
     assert_eq!(doc.word_count, 5);
+}
+
+#[test]
+fn anchors_slug_and_resolve() {
+    let src = "# Введение\n\nтекст\n\n## Введение\n\n# Заключение\n";
+    let doc = parse(Arc::from(src));
+    let slugs: Vec<&str> = doc.headings.iter().map(|h| h.slug.as_str()).collect();
+    assert_eq!(slugs, vec!["введение", "введение-1", "заключение"]);
+
+    // Якорь находит индекс блока-заголовка.
+    let blk = anchors::resolve(&doc, "#введение-1").expect("повторный slug");
+    assert!(matches!(doc.blocks[blk], BlockKind::Heading { level: 2, .. }));
+
+    // Кириллица в percent-кодировке (GitHub-стиль ссылок) и по тексту.
+    let percent = format!("#{}", percent_encode("заключение"));
+    assert_eq!(anchors::resolve(&doc, &percent), anchors::resolve(&doc, "#Заключение"));
+    assert!(anchors::resolve(&doc, "#нет-такого").is_none());
+}
+
+/// Кодирование не-ASCII байтов в %XX (для проверки декодера).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }

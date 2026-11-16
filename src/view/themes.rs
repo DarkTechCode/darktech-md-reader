@@ -1,6 +1,7 @@
 //! Палитры (дух MarkMello) и типографика документа из настроек.
 
 use eframe::egui::{self as egui, Color32, Context, FontFamily, Visuals};
+use eframe::egui::epaint::FontColorTransferFunction;
 use eframe::egui::epaint::text::TextOptions;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,9 @@ pub struct Palette {
     pub fab_bg: Color32,
     pub fab_chevron: Color32,
     pub fab_border: Color32,
+    /// Ручка скроллбара (обычная / при наведении). Трек = code_bg.
+    pub scroll_thumb: Color32,
+    pub scroll_thumb_hover: Color32,
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
@@ -69,6 +73,8 @@ pub const DARK: Palette = Palette {
     fab_bg: rgb(34, 34, 38),
     fab_chevron: rgb(109, 109, 108),
     fab_border: Color32::TRANSPARENT,
+    scroll_thumb: rgb(72, 72, 78),
+    scroll_thumb_hover: rgb(104, 104, 112),
 };
 
 pub const LIGHT: Palette = Palette {
@@ -92,6 +98,9 @@ pub const LIGHT: Palette = Palette {
     fab_bg: rgb(255, 255, 255),
     fab_chevron: rgb(105, 105, 103),
     fab_border: rgb(216, 214, 210),
+    // Свет на светлом был невидим: ручка заметно темнее бежевого трека.
+    scroll_thumb: rgb(186, 184, 178),
+    scroll_thumb_hover: rgb(148, 146, 140),
 };
 
 /// Осветление цвета к белому (для hover-состояний).
@@ -104,14 +113,21 @@ pub fn lighten(c: Color32, k: f32) -> Color32 {
 /// активный слот выбирается ThemePreference/системой и может переключиться
 /// среди кадра; если палитра лежит только в активном, новый слот отдаст
 /// дефолты egui (микс стилей).
+/// Гамма переноса цвета глифов: ОДНА на обе темы. Идеалы разные (светлая
+/// ~1.0 «сырой охват», тёмная ~0.5 с выпрямлением), атлас у egui один на
+/// всё — компромисс посередине. Для визуальных A/B-тестов владельца
+/// менять константу и пересобирать.
+const TEXT_GAMMA: f32 = 0.75;
+
 pub fn apply(ctx: &Context) {
-    // text_options ФИКСИРУЕМ одни на оба слота: у Visuals::dark()/light()
-    // разные color_transfer_function — если значение меняется при смене
-    // темы, egui сбрасывает ВЕСЬ атлас глифов (Fonts::set_options →
-    // GlyphAtlas::new). Закэшированные нами Arc<Galley> при этом остаются
-    // со старыми UV → «кракозябры»/пропадающий текст + фриз на
-    // ре-растеризации. Берём текущие text_options активного слота.
-    let text_options = ctx.global_style().visuals.text_options;
+    // text_options ФИКСИРУЕМ одни на оба слота и навсегда: любая смена опций
+    // сбрасывает атлас глифов, а кэш галлеев egui при этом НЕ чистится и
+    // остаётся со старыми UV → «кракозябры»/пропадающий текст (грабля этапа 2;
+    // повторилась и на «правильных» per-темных функциях — egui не даёт
+    // очистить этот кэш публично). Значение берём явно, а не «какое было в
+    // активном слоте» (оно зависело от темы ОС на старте).
+    let mut text_options = ctx.global_style().visuals.text_options;
+    text_options.color_transfer_function = FontColorTransferFunction::Gamma(TEXT_GAMMA);
     ctx.set_visuals_of(egui::Theme::Dark, visuals(&DARK, true, text_options));
     ctx.set_visuals_of(egui::Theme::Light, visuals(&LIGHT, false, text_options));
 
@@ -145,10 +161,12 @@ fn visuals(pal: &Palette, dark: bool, text_options: TextOptions) -> Visuals {
     vis.selection.bg_fill = pal.selection;
     vis.widgets.noninteractive.bg_fill = pal.bg;
     vis.widgets.noninteractive.fg_stroke.color = pal.fg;
+    // Разделитель панелей (оглавление/миникарта): в нашем цвете границы.
+    vis.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, pal.border);
     // Цвет ручки скроллбара (egui берёт его из widgets.*.bg_fill).
-    vis.widgets.inactive.bg_fill = lighten(pal.code_bg, 0.14);
-    vis.widgets.hovered.bg_fill = lighten(pal.code_bg, 0.26);
-    vis.widgets.active.bg_fill = lighten(pal.code_bg, 0.32);
+    vis.widgets.inactive.bg_fill = pal.scroll_thumb;
+    vis.widgets.hovered.bg_fill = pal.scroll_thumb_hover;
+    vis.widgets.active.bg_fill = pal.scroll_thumb_hover;
     // Плоский стиль: без скруглений.
     vis.widgets.inactive.corner_radius = egui::CornerRadius::same(0);
     vis.widgets.hovered.corner_radius = egui::CornerRadius::same(0);

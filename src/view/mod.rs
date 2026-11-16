@@ -1,6 +1,9 @@
 //! Отрисовка документа.
 
 pub mod doc_view;
+pub mod minimap;
+pub mod nav;
+pub mod outline;
 pub mod render;
 pub mod settings_panel;
 pub mod themes;

@@ -10,9 +10,9 @@ use eframe::egui::{pos2, vec2, CornerRadius, Rect, Sense, Stroke, Ui};
 
 use crate::i18n::{t, Lang};
 use crate::settings::model::{
-    SettingsData, LangMode, ThemeMode, FONT_MAX, FONT_MIN, LETTER_MAX, LETTER_MIN, LETTER_STEP,
-    LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_HEIGHT_STEP, UI_FONT_MAX, UI_FONT_MIN, WIDTH_MAX,
-    WIDTH_MIN, WIDTH_PRESETS,
+    SettingsData, LangMode, PanelMode, Side, ThemeMode, FONT_MAX, FONT_MIN, LETTER_MAX, LETTER_MIN,
+    LETTER_STEP, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_HEIGHT_STEP, TOC_LEVEL_MAX,
+    TOC_LEVEL_MIN, UI_FONT_MAX, UI_FONT_MIN, WIDTH_MAX, WIDTH_MIN, WIDTH_PRESETS,
 };
 use crate::view::themes::{lighten, FontChoice, Palette};
 use crate::view::widgets::plain_galley;
@@ -22,7 +22,8 @@ const PAD: f32 = 16.0;
 /// Шаг произвольной ширины текста (слайдер), px.
 const WIDTH_SLIDER_STEP: f32 = 20.0;
 
-pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) {
+/// Рисует панель; возвращает true, если запрошен перезапуск приложения.
+pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> bool {
     let em = s.ui_font_size as f32;
 
     // Заголовок.
@@ -216,21 +217,144 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) {
     );
     s.code_highlight = hl;
 
-    // Сброс настроек: отдельная кнопка с рамкой и отступом, чтобы случайно
-    // не нажать (действие необратимое — все настройки возвращаются к дефолтам).
+    // Навигация: миникарта и оглавление (сторона/максимальный уровень).
+    let mode_items = [
+        (t(lang, "st_auto"), PanelMode::Auto),
+        (t(lang, "st_on"), PanelMode::On),
+        (t(lang, "st_off"), PanelMode::Off),
+    ];
+    pills_row(
+        ui,
+        "minimap",
+        t(lang, "st_minimap"),
+        em,
+        pal,
+        &mode_items,
+        &mut s.minimap_mode,
+    );
+
+    pills_row(
+        ui,
+        "outline",
+        t(lang, "st_outline"),
+        em,
+        pal,
+        &mode_items,
+        &mut s.toc_mode,
+    );
+
+    pills_row(
+        ui,
+        "outline_side",
+        t(lang, "st_outline_side"),
+        em,
+        pal,
+        &[
+            (t(lang, "st_side_left"), Side::Left),
+            (t(lang, "st_side_right"), Side::Right),
+        ],
+        &mut s.toc_side,
+    );
+
+    // H1..H6 — компактные плашки уровней.
+    let levels: [(&str, u8); 6] = [
+        ("H1", TOC_LEVEL_MIN),
+        ("H2", 2),
+        ("H3", 3),
+        ("H4", 4),
+        ("H5", 5),
+        ("H6", TOC_LEVEL_MAX),
+    ];
+    pills_row(
+        ui,
+        "outline_level",
+        t(lang, "st_outline_level"),
+        em,
+        pal,
+        &levels,
+        &mut s.toc_max_level,
+    );
+
+    // Сброс настроек + перезапуск приложения (владелец тестирует: новый
+    // процесс открывает те же вкладки).
     ui.add_space(22.0);
     hline(ui, pal);
     ui.add_space(12.0);
+    let mut restart = false;
     ui.horizontal(|ui| {
         ui.add_space(PAD - 6.0);
-        if reset_button(ui, t(lang, "st_reset"), em, pal) {
+        if flat_bordered_button(ui, t(lang, "st_reset"), em, pal) {
             *s = SettingsData::default();
         }
+        ui.add_space(10.0);
+        if flat_bordered_button(ui, t(lang, "st_restart"), em, pal) {
+            restart = true;
+        }
     });
+
+    // Подпись автора: сайт и GitHub открываются в браузере.
+    ui.add_space(20.0);
+    ui.add_space(8.0);
+    let author = plain_galley(ui, &format!("{}: Dark Wizard", t(lang, "st_author")), em, pal.muted);
+    alloc_row(ui, em * 1.5, |ui, row| {
+        ui.painter().galley(
+            pos2(row.min.x + PAD, row.center().y - author.size().y * 0.5),
+            author,
+            pal.muted,
+        );
+    });
+    // Подпись-ссылки: метка («email:», «сайт:», «github:») — обычный текст,
+    // значение — ссылка (открывается в браузере).
+    let links = [
+        ("email", "md@darktech.ru", "mailto:md@darktech.ru"),
+        (t(lang, "st_site"), "https://darktech.ru", "https://darktech.ru"),
+        (
+            "github",
+            "https://github.com/darkTechCode/",
+            "https://github.com/darkTechCode/",
+        ),
+    ];
+    for (label, value, url) in links {
+        let lg = plain_galley(ui, &format!("{label}: "), em, pal.muted);
+        let vg = plain_galley(ui, value, em, pal.link);
+        let label_w = lg.size().x;
+        alloc_row(ui, em * 1.5, |ui, row| {
+            let cy = row.center().y;
+            ui.painter().galley(
+                pos2(row.min.x + PAD, cy - lg.size().y * 0.5),
+                lg,
+                pal.muted,
+            );
+            let rect = Rect::from_min_size(
+                pos2(row.min.x + PAD + label_w, cy - vg.size().y * 0.5),
+                vg.size(),
+            );
+            let resp = ui.interact(
+                rect,
+                ui.scope_id().with(("author_link", url)),
+                Sense::click(),
+            );
+            let hovered = resp.hovered();
+            // painter.galley игнорирует цвет для «цветных» галлеев — только override.
+            ui.painter().galley_with_override_text_color(
+                rect.min,
+                vg,
+                if hovered { lighten(pal.link, 0.25) } else { pal.link },
+            );
+            if hovered {
+                ui.ctx().set_cursor_icon(eframe::egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                ui.ctx().open_url(eframe::egui::OpenUrl::new_tab(url));
+            }
+        });
+    }
+    restart
 }
 
-/// Кнопка «Сбросить настройки»: рамка + паддинги, при наведении заливка.
-fn reset_button(ui: &mut Ui, text: &str, em: f32, pal: &Palette) -> bool {
+/// Кнопка с рамкой и паддингами («Сбросить настройки», «Перезапуск»):
+/// при наведении — заливка.
+fn flat_bordered_button(ui: &mut Ui, text: &str, em: f32, pal: &Palette) -> bool {
     let g = plain_galley(ui, text, em, pal.muted);
     let size = g.size() + vec2(em * 1.6, em * 0.9);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());

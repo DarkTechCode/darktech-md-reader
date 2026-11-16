@@ -10,6 +10,7 @@ use std::sync::mpsc::Sender;
 
 use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
+use super::anchors::unique_slug;
 use super::blocks::{Align, Alert, BlockKind, Doc, Fmt, Heading, ListMarker, Span, TableRow};
 
 /// Файлы меньше этого размера читаются и разбираются синхронно (мгновенно).
@@ -118,6 +119,8 @@ struct TableCtx {
 struct State {
     blocks: Vec<BlockKind>,
     headings: Vec<Heading>,
+    /// Занятые якоря-слаги (дедупликация по всему документу, между чанками).
+    slugs: std::collections::HashSet<String>,
     /// Накопленные inline-спаны текущего блока.
     spans: Vec<Span>,
     /// Стек inline-модификаторов.
@@ -148,6 +151,7 @@ impl State {
         Self {
             blocks: Vec::new(),
             headings: Vec::new(),
+            slugs: std::collections::HashSet::new(),
             spans: Vec::new(),
             inline: Vec::new(),
             lists: Vec::new(),
@@ -451,9 +455,11 @@ fn flush_heading(st: &mut State) {
     let spans = std::mem::take(&mut st.spans);
     let text: String = spans.iter().map(|s| s.text.as_str()).collect();
     let heading_idx = st.headings.len();
+    let slug = unique_slug(&text, &mut st.slugs);
     st.headings.push(Heading {
         level,
         text,
+        slug,
         // Сквозной индекс: блоки частично уже отправлены чанками.
         block_idx: st.blocks_sent + st.blocks.len(),
     });

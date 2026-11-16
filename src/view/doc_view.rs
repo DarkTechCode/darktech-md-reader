@@ -10,6 +10,7 @@ use eframe::egui::{
 use crate::layout::{measure, LayoutKey, LayoutState};
 use crate::md::blocks::Doc;
 
+use super::nav;
 use super::render;
 use super::themes::{self, lighten};
 use super::Env;
@@ -22,8 +23,9 @@ pub enum DocEvent {
 
 /// Запас рендера сверху/снизу от вьюпорта, px.
 const OVERSCAN: f32 = 600.0;
-const TOP_PAD: f32 = 20.0;
-const BOTTOM_PAD: f32 = 40.0;
+/// Поля над/под документом в координатах контента (нужно панелям навигации).
+pub const TOP_PAD: f32 = 20.0;
+pub const BOTTOM_PAD: f32 = 40.0;
 
 const FAB_SIZE: f32 = 44.0;
 const FAB_MARGIN_BOTTOM: f32 = 20.0;
@@ -48,8 +50,9 @@ pub fn show(
     let scroll_id = ui.scope_id().with(("doc_scroll", tab_key));
     let fab_id = ui.scope_id().with(("fab_top", tab_key));
 
-    // Принудительный оффсет этого кадра: просьба «наверх», автоскролл или
-    // компенсация «прилипания» (высоты выше вьюпорта изменились).
+    // Принудительный оффсет этого кадра: просьба «наверх», навигация
+    // (оглавление/миникарта/якорь), автоскролл или компенсация «прилипания»
+    // (высоты выше вьюпорта изменились).
     let mut forced: Option<f32> = None;
     let to_top = ui.ctx().data_mut(|d| {
         let v = d.get_temp::<bool>(fab_id).unwrap_or(false);
@@ -58,16 +61,19 @@ pub fn show(
         }
         v
     });
-    let as_off_key = ui.scope_id().with(("autoscroll_off", tab_key));
+    let nav_req = nav::take_request(ui.ctx(), tab_key);
+    let as_off = nav::take_autoscroll_offset(ui.ctx(), tab_key);
     if to_top {
         forced = Some(0.0);
-    } else if let Some(off) = ui.ctx().data_mut(|d| {
-        let v = d.get_temp::<f32>(as_off_key);
-        if v.is_some() {
-            d.remove::<f32>(as_off_key);
-        }
-        v
-    }) {
+        nav::stop_autoscroll(ui.ctx(), tab_key);
+    } else if let Some(req) = nav_req {
+        let y = match req {
+            nav::ScrollRequest::Block(i) => TOP_PAD + layout.offset(i),
+            nav::ScrollRequest::Y(y) => y,
+        };
+        forced = Some(y.max(0.0));
+        nav::stop_autoscroll(ui.ctx(), tab_key);
+    } else if let Some(off) = as_off {
         forced = Some(off);
     } else if let Some(delta) = layout.take_pending_scroll() {
         let cur = scroll_area::State::load(ui.ctx(), scroll_id)
@@ -88,14 +94,18 @@ pub fn show(
         // «По ширине окна»: колонка на всё, но с полями 20px, чтобы текст
         // не прилипал к краям (и не мешал скроллбару). Ось — целые пиксели:
         // дробная ширина дрожала бы раскладкой при каждом пикселе ресайза.
+        // В обычном режиме узкое окно тоже не прилипает к краям: минимум
+        // 10px с каждой стороны.
         const FIT_PAD: f32 = 20.0;
+        const SIDE_PAD: f32 = 10.0;
         let col = if env.fit_width {
             avail - FIT_PAD * 2.0
         } else {
-            env.typo.width.min(avail)
+            env.typo.width.min(avail - SIDE_PAD * 2.0)
         }
         .floor()
-        .max(300.0);
+        .max(120.0)
+        .min(avail);
         layout.ensure(
             doc,
             LayoutKey {
@@ -150,6 +160,17 @@ pub fn show(
         show_fab(ui, progress, fab_id, env);
     }
 
+    // Метрики для панелей навигации (оглавление, миникарта).
+    nav::publish_metrics(
+        ui.ctx(),
+        tab_key,
+        nav::Metrics {
+            offset,
+            viewport_h: out.inner_rect.height(),
+            content_h: out.content_size.y,
+        },
+    );
+
     autoscroll(ui, &out, tab_key, env);
     events
 }
@@ -164,9 +185,9 @@ fn autoscroll(
     tab_key: u64,
     env: &Env,
 ) {
-    let key = ui.scope_id().with(("autoscroll", tab_key));
-    let off_key = ui.scope_id().with(("autoscroll_off", tab_key));
-    let mut anchor: Option<egui::Pos2> = ui.ctx().data_mut(|d| d.get_temp(key)).flatten();
+    // Якорь и оффсет — на глобальных ключах nav: миникарта выключает
+    // автоскролл при драге (два механизма не борются за оффсет).
+    let mut anchor = nav::autoscroll_anchor(ui.ctx(), tab_key);
 
     // Клик средней кнопкой по области документа — вкл/выкл.
     let mid_pressed = ui.input(|i| i.pointer.button_pressed(PointerButton::Middle));
@@ -184,7 +205,7 @@ fn autoscroll(
     if anchor.is_some() && (wheeled || ui.input(|i| i.key_pressed(Key::Escape))) {
         anchor = None;
     }
-    ui.ctx().data_mut(|d| d.insert_temp(key, anchor));
+    nav::set_autoscroll_anchor(ui.ctx(), tab_key, anchor);
     let Some(anchor) = anchor else { return };
 
     let dir = if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
@@ -205,7 +226,7 @@ fn autoscroll(
         let cur = out.state.clamped_offset().y;
         let next = (cur + dir * dt).clamp(0.0, max);
         if (next - cur).abs() > 0.01 {
-            ui.ctx().data_mut(|d| d.insert_temp(off_key, next));
+            nav::set_autoscroll_offset(ui.ctx(), tab_key, next);
         }
     }
 

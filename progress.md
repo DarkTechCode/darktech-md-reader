@@ -25,7 +25,7 @@ cargo run -- temp/demo.md                 # запуск с демо-файло�
 Поведение в окне проверяет владелец визуально: запускай приложение в фоне
 (`run_in_background`), проси скриншот, правь по фидбеку. Коммит — после каждого этапа.
 
-## 2. Что готово (этапы 0–1 плана + правки владельца)
+## 2. Что готово (этапы 0–3 плана + правки владельца)
 
 **Этап 0 (каркас)** — парсер `pulldown-cmark` → плоские блоки (`src/md/`): заголовки,
 абзацы, спаны (bold/italic/code/strike/links с URL, диапазоны в source), списки
@@ -60,6 +60,41 @@ cargo run -- temp/demo.md                 # запуск с демо-файло�
 резервируют 22px под горизонтальный скроллбар; вертикальные отступы всех блоков
 увеличены (абзац 0.6em, код 0.85em, таблица 0.95/0.7em, правила в measure.rs);
 таб-бар 18px/40px, имя файла с `.md`; «Копировать» → «Скопировано!» на 3 с.
+
+**Этап 3 (навигация + сверх плана по фидбеку владельца):**
+- Оглавление `src/view/outline.rs`: виртуализованный список h1–h6 с ПЕРЕНОСОМ
+  слов (высоты строк перемеряются лениво, префикс-суммы + бинарный поиск —
+  TocState в Tab); клик — скролл к разделу; текущий раздел подсвечен
+  (pal.link + полоса 2px); список сам держит текущий раздел в зоне видимости.
+- Миникарта-скелет `src/view/minimap.rs`: блоки квантуются в пиксельные ряды
+  (O(высоты миникарты), кэш по layout.version), заголовки 2px и ярче (h1/h2 —
+  акцент), код/таблицы/цитаты/картинки-рамки; прямоугольник вьюпорта;
+  клик/драг — центрирование; колесо — как документ ×1.5 (units→points как
+  egui, line_scroll_speed).
+- Якоря `#heading`: `src/md/anchors.rs` — GitHub-слаги (кириллица, дедуп
+  `-1/-2`, percent-декодирование), slug в `Doc::headings`; клик по якорной
+  ссылке скроллит к заголовку.
+- Статус-бар: слова + «чтение: N мин» (220 сл/мин) + прежние симв/строки/объём.
+- Тумблеры в статус-баре: «Оглавление вкл/выкл», «Миникарта вкл/выкл», «По
+  ширине окна вкл/выкл» — состояние текстом, плашки без инверсии.
+- Настройки: Миникарта/Оглавление Авто/Вкл/Выкл (авто: оглавление ≥3
+  заголовков, миникарта — документ >2,5 экранов), сторона оглавления, уровень
+  H1–H6; ширины панелей (tocWidth/minimapWidth в settings.json) тянутся своей
+  ручкой (resize_handle: линия на границе, ±5px зона, курсор ↔).
+- Связь панелей со скроллом — `src/view/nav.rs`: глобальные ключи (Id::unique
+  детерминирован), Metrics (offset/viewport/content) публикует doc_view,
+  ScrollRequest {Block, Y} потребляет doc_view; автоскролл выключается при
+  навигации. TOP_PAD/BOTTOM_PAD публичны.
+- Подпись в настройках: «Автор: Dark Wizard», email/сайт/github — метка
+  текстом, значение ссылкой; кнопка «Перезапуск» (новый процесс с теми же
+  вкладками) рядом со «Сбросить настройки».
+- Скроллбар светлой темы: явные цвета ручки в палитре (scroll_thumb —
+  светлая тема была свет-на-свете).
+- Правки по фидбеку: ~4 раунда. Грабли: паника первого кадра (панель читает
+  layout до ensure — offset() теперь безопасен, minimap ждёт blocks_len);
+  PanelState egui НЕ сохранял размеры наших панелей → ширины свои; сброс
+  атласа не чистит кэш галлеев egui → text_options заморожены (Gamma 0.75,
+  константа TEXT_GAMMA для A/B-тестов владельца).
 
 **Этап 2 (типографика и настройки + сверх плана по фидбеку владельца):**
 - `src/settings/` — serde-модель (camelCase, `#[serde(default)]`, повреждённый →
@@ -103,36 +138,51 @@ max по ячейкам (в этапе 0 была сумма — исправл�
 
 ```
 src/main.rs            запуск, CLI-пути, NativeOptions
-src/app.rs             App/Tab (TabState: Welcome/Error/Loading/Ready), таб-бар («Открыть»,
+src/app.rs             App/Tab (TabState, layout, toc: TocState), таб-бар («Открыть»,
                        вкладки вплотную, ‹ ›, шестерёнка, Ctrl+колесо), хоткеи, drag&drop,
-                       open_link, pump_tabs, статус-бар (статистика+выделение+fitWidth),
+                       open_link (в т.ч. якоря #), pump_tabs, панели навигации (оглавление/
+                       миникарта: видимость, ширины, resize_handle), статус-бар (статистика +
+                       чтение N мин + выделение + 3 тумблера «вкл/выкл»), restart_app,
                        SelectionWatcher-плагин, find_demo_md, apply_theme/effective_dark
 src/clipboard.rs       запись в клипборд ИЗ ФОНА (синхронная может блокировать навсегда)
 src/fonts.rs           регистрация шрифтов (Inter→Proportional/Sans, NotoSerif→Serif, JBMono→Monospace/Mono)
 src/highlight.rs       подсветка syntect: ленивые наборы, прогрев фоном, highlight()
 src/i18n.rs            RU/EN, t(lang, key); system_lang()
-src/md/blocks.rs       модель: Doc (word/char/line_count)/BlockKind/Span/Fmt/Alert/TableRow
+src/md/anchors.rs      слаги заголовков (GitHub-стиль, дедуп), resolve(anchor) → block_idx,
+                       percent_decode; тесты
+src/md/blocks.rs       модель: Doc (word/char/line_count)/BlockKind/Span/Fmt/Alert/TableRow,
+                       Heading { level, text, slug, block_idx }
 src/md/parser.rs       pulldown-cmark → блоки; parse() + parse_background() (стрим);
-                       count_stats() в Done
-src/layout/mod.rs      LayoutState: высоты, offsets, visible_range, компенсация; LayoutKey
+                       count_stats() в Done; слаги при flush_heading
+src/layout/mod.rs      LayoutState: высоты, offsets (безопасные при пустой раскладке),
+                       visible_range, компенсация, version (для кэша миникарты); LayoutKey
                        { typo, width, dark, lang, code_nums }
 src/layout/cache.rs    кэш Prepared-блоков (вытеснение по дистанции от текущего блока)
 src/layout/measure.rs  JobSpec→LayoutJob, estimate(), measure_block() → Prepared; отступы
                        блоков, гуттер номеров, CODE_FOOTER_H, fit-таблицы
-src/settings/model.rs  SettingsData (serde camelCase, normalize-клампы), Typo из настроек
+src/settings/model.rs  SettingsData (serde camelCase, normalize-клампы; навигация: режимы
+                       панелей, сторона, уровень, ширины toc/minimap), Typo из настроек
 src/settings/store.rs  %APPDATA%\DarkTechMD\settings.json: load (битый→дефолты), save (tmp+rename)
 src/view/mod.rs        Env { pal, typo, lang, fit_width, table_top, code_line_numbers, code_highlight }
-src/view/themes.rs     Palette (DARK/LIGHT + fab_*), Typo, apply() (оба слота + text_options)
-src/view/doc_view.rs   виртуальный скролл + колонка (fit = avail-40, floor) + FAB + автоскролл
+src/view/themes.rs     Palette (DARK/LIGHT + fab_*, scroll_thumb), Typo, apply() (оба слота +
+                       text_options заморожены: TEXT_GAMMA=0.75, см. §4)
+src/view/nav.rs        связь панелей ↔ doc_view: глобальные ключи, Metrics, ScrollRequest,
+                       вкл/выкл автоскролла
+src/view/outline.rs    оглавление: виртуализация с переносами (TocState), подсветка текущего
+src/view/minimap.rs    скелет миникарты: полоски по пиксельным рядам, кэш, вьюпорт, драг,
+                       колесо
+src/view/doc_view.rs   виртуальный скролл + колонка (min 10px от краёв, fit = avail-40) +
+                       FAB + автоскролл (ключи nav) + публикация Metrics/приём ScrollRequest
 src/view/render/…      отрисовка Prepared: text (put_text/ссылки), code (карточка, гуттер,
                        подсветка, 2×«Копировать»), table (top-align), misc
-src/view/settings_panel.rs  панель настроек: строки «подпись + плашки/слайдер», сброс
-src/view/widgets.rs    flat_text_button, plain_galley
+src/view/settings_panel.rs  панель настроек: строки «подпись + плашки/слайдер», сброс,
+                       перезапуск, подпись автора (метки + ссылки)
+src/view/widgets.rs    flat_text_button, flat_pill_button, plain_galley, wrapped_galley
 src/view/welcome.rs    welcome-экран (масштаб UI-шрифта)
-tests/parse_basic.rs   5 тестов парсера
+tests/parse_basic.rs   6 тестов парсера (включая якоря)
 tests/perf_smoke.rs    бюджеты §7 + LayoutKey-тест; #[ignore] 50 МБ
 temp/demo.md, temp/documentation.md   ручные файлы проверки (gitignored; demo.md —
-                       «все элементы», открывается по умолчанию без аргументов)
+                       «все элементы» + строка якорных ссылок, открывается по умолчанию)
 assets/fonts/          *.ttf + OFL-*.txt
 ```
 
@@ -185,12 +235,27 @@ assets/fonts/          *.ttf + OFL-*.txt
   `grep -ao "VCRUNTIME[0-9_]*\.dll" exe` — пусто = ок). Релизный exe складываем в `bin/DarkTechMD.exe` (вне git).
 - Release-сборка без окна консоли: `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]` в main.rs.
 - ГЛАВНАЯ ГРАБЛЯ ЭТАПА 2 (кракозябры/пропадающий текст/фризы при смене темы): `Glyph`
-  хранит `uv_rect` АТЛАСА, запечённый в galley при раскладке. У `Visuals::dark()` и
-  `light()` РАЗНЫЕ `text_options.color_transfer_function` → смена темы меняет опции →
-  egui делает `GlyphAtlas::new` (полный сброс атласа) → ВСЕ закэшированные нами
-  `Arc<Galley>` (Prepared-кэш) остаются со старыми UV (сам egui чистит только свой кэш).
-  ЛЕЧЕНИЕ: `themes::apply` берёт текущие `ctx.global_style().visuals.text_options`
-  и пишет их в ОБА слота (`set_visuals_of(Dark/Light)`) — опции не меняются никогда.
+  хранит `uv_rect` АТЛАСА, запечённый в galley при раскладке. Любая смена
+  `text_options` → egui делает `GlyphAtlas::new` (полный сброс атласа), НО кэш
+  галлеев egui (`GalleyCache`) при этом НЕ чистится и остаётся со старыми UV —
+  публичного API очистки нет (проверено по исходникам: FontsImpl::set_options
+  пересоздаёт только атлас). Поэтому per-темные `color_transfer_function`
+  (LIGHT/DARK_MODE_DEFAULT) НЕВОЗМОЖНЫ без кракозябр. ЛЕЧЕНИЕ: `themes::apply`
+  пишет ОДНИ И ТЕ ЖЕ опции в ОБА слота — явно заданную `Gamma(TEXT_GAMMA=0.75)`
+  (компромисс светлой ~1.0 и тёмной ~0.5; A/B — менять константу и пересобирать).
+- `Id::unique(x)` ДЕТЕРМИНИРОВАН (ahash с фиксированными сидами) — годится для
+  глобальных ключей temp-data, доступных из разных ui-ско́пов (nav.rs: панели ↔
+  doc_view). Не путать со scope-ключами `ui.scope_id().with(...)`.
+- Panel::left/right с `.resizable(true)` НЕ сохранял размер наших условных панелей
+  (PanelState слетал между кадрами при show_mm/show_toc-условии) → ширины держим
+  сами (settings.json) и тянем своей ручкой (resize_handle в app.rs); сам egui-
+  сепаратор панели выключен (.show_separator_line(false)).
+- Панели навигации читают layout ДО первого ensure() кадра: `LayoutState::offset()`
+  безопасен на пустых offsets (0.0), `height()` клампится; minimap ждёт
+  `blocks_len() == doc.blocks.len()` (иначе паника первого кадра в режиме Вкл).
+- Колесо: `Event::MouseWheel { delta, unit }` — на Windows unit=Line, delta=±1
+  на щелчок; точки = delta × `ctx.options(|o| o.input_options.line_scroll_speed)`
+  (=40). Сырые ±1 — в 40 раз медленнее обычного скролла.
 - `Painter::galley(pos, g, color)` — цвет-аргумент это FALLBACK: игнорируется для
   галлеев с уже заданными цветами (jobs всегда цветные). Для перекраски —
   `galley_with_override_text_color` (плашки, кнопки, «Копировать»).
@@ -209,22 +274,22 @@ assets/fonts/          *.ttf + OFL-*.txt
   через `.vertical_scroll_offset(abs)` следующим кадром (temp-data), как «наверх».
 - `Id::new` deprecated → `Id::unique` (для глобальных) / `IdSalt::new`.
 
-## 5. Следующий этап — 3. Навигация
+## 5. Следующий этап — 4. Мышь: выделение, копирование, ссылки, контекст-меню
 
-Оглавление (слева, опционально: из h1–h6, клик — скролл к разделу, подсветка текущего
-по позиции скролла; настройки сторона/макс. уровень — PLAN §4.6), миникарта-скелет
-справа (полоски-блоки, O(высота миникарты), прямоугольник вьюпорта, клик/драг),
-якоря `#heading` (сейчас заглушка в open_link; headings+block_idx уже в Doc),
-статус-бар: слова и «чтение: N мин» (word_count уже есть, 220 сл/мин).
-Опции миникарты/оглавления — в панель настроек (PLAN §4.9: Авто/Вкл/Выкл, сторона,
-макс. уровень). Приёмка: навигация не мешает виртуализации (бюджеты §7).
+Собственный трекинг выделения вместо плагина-наблюдателя (глюк «выделено»
+появляется не с первого раза — хвост §6): диапазон (block, range) → маппинг к
+source offsets через span.src, живой счётчик посимвольно в статус-бар; двойной
+клик — слово, тройной — абзац; Ctrl+A — весь документ виртуально (без
+раскладки); Ctrl+C — plain text (уже есть clipboard из фона); контекст-меню
+правым кликом: Копировать / Выделить всё / (на ссылке) Копировать адрес;
+ссылки в ячейках таблиц (put_text сейчас только для абзацев/цитат/списков/
+заголовков); сохранение выделения при скролле за пределы окна.
 
-Дальше по PLAN.md §8: 4 (добить: контекст-меню, Ctrl+A, правый клик на ссылке,
-выделение при виртуальном скролле, живой счётчик выделения — см. хвосты) →
-5 (поиск Ctrl+F, инкрементальный, memchr/aho-corasick в фоне) → 6 (сессия вкладок+позиций,
-watcher notify c debounce 300мс, баннер «файл недоступен», последние файлы на welcome) →
-7 (иконка winres, метаданные, perf-тесты, README; оптимизация памяти: спаны заимствуют
-текст из source вместо дублей строк).
+Дальше по PLAN.md §8: 5 (поиск Ctrl+F, инкрементальный, memchr/aho-corasick
+в фоне) → 6 (сессия вкладок+позиций, watcher notify c debounce 300мс, баннер
+«файл недоступен», последние файлы на welcome) → 7 (иконка winres, метаданные,
+perf-тесты, README; оптимизация памяти: спаны заимствуют текст из source
+вместо дублей строк).
 
 ## 6. Известные недоделки/хвосты
 
@@ -239,11 +304,15 @@ watcher notify c debounce 300мс, баннер «файл недоступен�
   пропорционально (пол 24px) — очень широкие таблицы без пола могут быть тесными.
 - Память: текст хранится дважды (source + строки спанов ≈ 2× файла) + база egui ~75 МБ.
   Оптимизация — этап 7.
-- Локальные картинки — плейсхолдер (img_store: decode в фоне, LRU — этап 3+).
+- Локальные картинки — плейсхолдер (img_store: decode в фоне, LRU — после v1).
 - Подсветка кода красит видимый срез с перезапуском состояния на границе среза
   (многострочные токены, начавшиеся выше, могут подсветиться неверно) — принято.
 - Заголовки окна/таб-бар — минималистичные, вид владелец утвердил; не переусердствовать
   со «стилем egui» — везде плоско, без скруглений.
+- Качество шрифтов (владелец не увидел заметной разницы): A/B-тест владельца —
+  менять TEXT_GAMMA в themes.rs и пересобирать, сравнивать кнопкой «Перезапуск».
+- Ширины панелей навигации живут в settings.json (tocWidth/minimapWidth);
+  механизм PanelState у egui для наших панелей не работал (см. §4).
 
 ## 7. Рабочий процесс в чате с агентом
 

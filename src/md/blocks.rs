@@ -37,6 +37,8 @@ pub struct Heading {
     pub level: u8,
     /// Заголовок чистым текстом.
     pub text: String,
+    /// Якорь для ссылок `#…` (уникален в документе, стиль GitHub).
+    pub slug: String,
     /// Индекс блока-заголовка в `Doc::blocks`.
     pub block_idx: usize,
 }

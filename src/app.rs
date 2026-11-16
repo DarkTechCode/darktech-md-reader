@@ -15,11 +15,12 @@ use eframe::egui::text::{ByteIndex, Galley, LayoutJob, LayoutSection, TextFormat
 
 use crate::i18n::{t, Lang};
 use crate::layout::LayoutState;
+use crate::md::anchors;
 use crate::md::blocks::Doc;
 use crate::md::parser::{self, ParseMsg};
-use crate::settings::model::{self, SettingsData, ThemeMode, WIDTH_PRESETS};
+use crate::settings::model::{self, PanelMode, SettingsData, Side, ThemeMode, WIDTH_PRESETS};
 use crate::settings::store;
-use crate::view::{doc_view, settings_panel, themes, welcome, Env};
+use crate::view::{doc_view, minimap, nav, outline, settings_panel, themes, welcome, Env};
 use crate::fonts;
 
 /// Задержка записи settings.json после последнего изменения (дебаунс слайдеров).
@@ -101,6 +102,9 @@ pub struct App {
     save_after: Option<Instant>,
 }
 
+/// Слова в минуту для оценки времени чтения (как у MarkMello).
+const READ_WPM: usize = 220;
+
 pub struct Tab {
     /// Стабильный id вкладки (id скролла и блоков привязаны к нему).
     pub id: u64,
@@ -108,6 +112,8 @@ pub struct Tab {
     pub state: TabState,
     /// Раскладка документа этой вкладки (высоты, кэш galley).
     pub layout: LayoutState,
+    /// Состояние оглавления вкладки (высоты строк с переносами).
+    pub toc: outline::TocState,
 }
 
 pub enum TabState {
@@ -128,6 +134,7 @@ impl Tab {
             path: None,
             state: TabState::Welcome,
             layout: LayoutState::default(),
+            toc: outline::TocState::default(),
         }
     }
 
@@ -152,6 +159,7 @@ impl Tab {
             path: Some(path),
             state,
             layout: LayoutState::default(),
+            toc: outline::TocState::default(),
         }
     }
 
@@ -300,6 +308,53 @@ impl App {
         loading
     }
 
+    /// Документ активной вкладки: готовый или ещё стримящийся (для панелей
+    /// навигации и якорей).
+    fn active_doc(&self) -> Option<(&Doc, u64)> {
+        let tab = self.tabs.get(self.active)?;
+        Some((state_doc(&tab.state)?, tab.id))
+    }
+
+    /// Видимость оглавления по режиму (Авто — при ≥3 заголовках).
+    fn toc_visible(&self) -> bool {
+        self.active_doc().is_some_and(|(doc, _)| match self.settings.toc_mode {
+            PanelMode::Off => false,
+            PanelMode::On => !doc.headings.is_empty(),
+            PanelMode::Auto => doc.headings.len() >= 3,
+        })
+    }
+
+    /// Видимость миникарты по режиму (Авто — документ длиннее ~2,5 экранов;
+    /// метрики прокрутки — с прошлого кадра).
+    fn minimap_visible(&self, ctx: &Context) -> bool {
+        match self.settings.minimap_mode {
+            PanelMode::Off => false,
+            PanelMode::On => self.active_doc().is_some_and(|(doc, _)| !doc.blocks.is_empty()),
+            PanelMode::Auto => self
+                .active_doc()
+                .and_then(|(_, id)| nav::metrics(ctx, id))
+                .is_some_and(|m| m.content_h > m.viewport_h * 2.5),
+        }
+    }
+
+    /// Быстрый тумблер из статус-бара: видно → Выкл, скрыто → Вкл (режим
+    /// «Авто» заменяется явным выбором).
+    fn toggle_toc(&mut self) {
+        self.settings.toc_mode = if self.toc_visible() {
+            PanelMode::Off
+        } else {
+            PanelMode::On
+        };
+    }
+
+    fn toggle_minimap(&mut self, ctx: &Context) {
+        self.settings.minimap_mode = if self.minimap_visible(ctx) {
+            PanelMode::Off
+        } else {
+            PanelMode::On
+        };
+    }
+
     /// Открывает файл новой вкладкой (или заменяет единственную welcome-вкладку).
     fn open(&mut self, path: PathBuf) {
         let replace_welcome = self.tabs.len() == 1 && self.tabs[0].path.is_none();
@@ -348,7 +403,12 @@ impl App {
             };
             self.open(path);
         } else if url.starts_with('#') {
-            // Якорь внутри документа — появится на этапе навигации.
+            // Якорь внутри документа: скролл к заголовку с таким slug-ом.
+            if let Some((doc, tab_id)) = self.active_doc()
+                && let Some(block_idx) = anchors::resolve(doc, url)
+            {
+                nav::request_scroll(ctx, tab_id, nav::ScrollRequest::Block(block_idx));
+            }
         } else {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
@@ -453,6 +513,29 @@ fn next_tab(cur: usize, len: usize, back: bool) -> usize {
     }
 }
 
+/// Документ из состояния вкладки (готовый или стримящийся чанками).
+fn state_doc(state: &TabState) -> Option<&Doc> {
+    match state {
+        TabState::Ready(arc) => Some(arc.as_ref()),
+        TabState::Loading { doc, .. } => Some(doc),
+        _ => None,
+    }
+}
+
+/// Перезапуск приложения: новый процесс с путями открытых вкладок (для
+/// тестирования владельцем — например, сравнение качества шрифтов).
+fn restart_app(tabs: &[Tab]) -> ! {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("DarkTechMD.exe"));
+    let args: Vec<String> = tabs
+        .iter()
+        .filter_map(|t| t.path.as_ref().map(|p| p.display().to_string()))
+        .collect();
+    if let Err(e) = std::process::Command::new(exe).args(args).spawn() {
+        log::warn!("перезапуск не удался: {e}");
+    }
+    std::process::exit(0);
+}
+
 /// Эффективная тёмная тема: System — по данным ОС (пока неизвестно → тёмная).
 fn effective_dark(ctx: &Context, mode: ThemeMode) -> bool {
     match mode {
@@ -537,6 +620,7 @@ impl eframe::App for App {
             let lang = self.lang();
             let pal = self.pal();
             let w = (430.0 * self.ui_scale()).clamp(360.0, 640.0);
+            let mut restart = false;
             egui::Panel::right("settings_panel")
                 .resizable(false)
                 .exact_size(w)
@@ -545,7 +629,11 @@ impl eframe::App for App {
                     egui::ScrollArea::vertical()
                         .id_salt("settings_scroll")
                         .auto_shrink([false, false])
-                        .show(ui, |ui| settings_panel::show(ui, &mut self.settings, pal, lang));
+                        .show(ui, |ui| {
+                            if settings_panel::show(ui, &mut self.settings, pal, lang) {
+                                restart = true;
+                            }
+                        });
                     // Плоская граница слева (сам рисуем — стили egui не используем).
                     let r = ui.min_rect();
                     ui.painter().line_segment(
@@ -553,6 +641,67 @@ impl eframe::App for App {
                         egui::Stroke::new(1.0, pal.border),
                     );
                 });
+            if restart {
+                restart_app(&self.tabs);
+            }
+        }
+
+        // Панели навигации: оглавление (сторона — из настроек) и миникарта.
+        let show_toc = self.toc_visible();
+        let show_mm = self.minimap_visible(&ctx);
+
+        // Ширины панелей — наши (settings.json), растяжение — своей ручкой:
+        // механизм PanelState у egui не сохранял размер между кадрами.
+        let pal = self.pal();
+        let mut toc_w = self.settings.toc_width;
+        let mut mm_w = self.settings.minimap_width;
+        let left = self.settings.toc_side == Side::Left;
+
+        if show_toc
+            && let Some(tab) = self.tabs.get_mut(self.active)
+            && let Some(doc) = state_doc(&tab.state)
+        {
+            let (tab_id, layout, toc) = (tab.id, &tab.layout, &mut tab.toc);
+            let em = self.settings.ui_font_size as f32;
+            let max_level = self.settings.toc_max_level;
+            let panel = if left {
+                egui::Panel::left("outline")
+            } else {
+                egui::Panel::right("outline")
+            };
+            panel
+                .resizable(false)
+                .exact_size(toc_w)
+                .show_separator_line(false)
+                .frame(Frame::NONE.fill(pal.bg))
+                .show(ui, |ui| {
+                    outline::show(ui, doc, layout, pal, tab_id, max_level, em, toc);
+                    resize_handle(ui, "toc_resize", left, ui.max_rect(), pal, &mut toc_w, model::TOC_WIDTH_RANGE);
+                });
+        }
+
+        if show_mm
+            && let Some(tab) = self.tabs.get_mut(self.active)
+            && let Some(doc) = state_doc(&tab.state)
+        {
+            let (tab_id, layout) = (tab.id, &tab.layout);
+            let dark = self.dark;
+            egui::Panel::right("minimap")
+                .resizable(false)
+                .exact_size(mm_w)
+                .show_separator_line(false)
+                .frame(Frame::NONE.fill(pal.bg))
+                .show(ui, |ui| {
+                    minimap::show(ui, doc, layout, pal, tab_id, dark);
+                    resize_handle(ui, "mm_resize", false, ui.max_rect(), pal, &mut mm_w, model::MM_WIDTH_RANGE);
+                });
+        }
+
+        if toc_w != self.settings.toc_width {
+            self.settings.toc_width = toc_w;
+        }
+        if mm_w != self.settings.minimap_width {
+            self.settings.minimap_width = mm_w;
         }
 
         // Статистика выделения (считается плагином в конце прохода).
@@ -913,7 +1062,10 @@ fn status_bar(ui: &mut Ui, app: &mut App, sel: Option<SelStats>) {
     // Статистика активной вкладки (для загрузки — «чтение…»).
     let stats = match app.tabs.get(app.active).map(|t| &t.state) {
         Some(TabState::Ready(doc)) => Some(format!(
-            "{} {} · {} {} · {}",
+            "{} {} · {} · {} {} · {} {} · {}",
+            fmt_num(doc.word_count),
+            t(lang, "sb_words"),
+            reading_time(doc.word_count, lang),
             fmt_num(doc.char_count),
             t(lang, "sb_symbols"),
             fmt_num(doc.line_count),
@@ -950,47 +1102,46 @@ fn status_bar(ui: &mut Ui, app: &mut App, sel: Option<SelStats>) {
             );
         }
 
-        // Тумблер «по ширине окна»: правый край — с запасом от угла ресайза окна.
-        let label = t(lang, "st_fit_width");
-        let g = crate::view::widgets::plain_galley(ui, label, em, pal.fg);
-        let w = g.size().x + 18.0;
-        let lead = (ui.available_width() - w - 25.0).max(0.0);
+        // Тумблеры справа: оглавление · миникарта · «по ширине окна».
+        // Состояние — текстом («вкл/выкл»), без смены цвета плашки.
+        // Правый край — с запасом от угла ресайза окна.
+        const GAP: f32 = 8.0;
+        let states = [
+            app.toc_visible(),
+            app.minimap_visible(ui.ctx()),
+            app.settings.fit_width,
+        ];
+        let labels: Vec<String> = [
+            t(lang, "st_outline"),
+            t(lang, "st_minimap"),
+            t(lang, "st_fit_width"),
+        ]
+        .iter()
+        .zip(states)
+        .map(|(l, on)| format!("{l} {}", t(lang, if on { "sb_on" } else { "sb_off" })))
+        .collect();
+        let widths: Vec<f32> = labels
+            .iter()
+            .map(|l| crate::view::widgets::plain_galley(ui, l, em, pal.fg).size().x + 18.0)
+            .collect();
+        let total: f32 = widths.iter().sum::<f32>() + GAP * 2.0;
+        let lead = (ui.available_width() - total - 25.0).max(0.0);
         ui.add_space(lead);
-        let (r, _) = ui.allocate_exact_size(vec2(w, h - 8.0), Sense::hover());
-        let resp = ui.interact(
-            r,
-            ui.scope_id().with("fit_width"),
-            Sense::click(),
-        );
-        let on = app.settings.fit_width;
-        let hovered = resp.hovered();
-        let painter = ui.painter().clone();
-        if on {
-            painter.rect_filled(r, egui::CornerRadius::same(0), pal.fg);
-        } else {
-            let border = if hovered { pal.muted } else { pal.border };
-            painter.rect(
-                r,
-                egui::CornerRadius::same(0),
-                egui::Color32::TRANSPARENT,
-                egui::Stroke::new(1.0, border),
-                egui::StrokeKind::Middle,
-            );
+
+        let mut clicked: Option<usize> = None;
+        for (i, label) in labels.iter().enumerate() {
+            if i > 0 {
+                ui.add_space(GAP);
+            }
+            if status_toggle(ui, i, label, em, &pal, h) {
+                clicked = Some(i);
+            }
         }
-        let color = if on {
-            pal.bg
-        } else if hovered {
-            pal.fg
-        } else {
-            pal.muted
-        };
-        // painter.galley игнорирует цвет для «цветных» галлеев — только override.
-        painter.galley_with_override_text_color(r.center() - g.size() * 0.5, g, color);
-        if hovered {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if resp.clicked() {
-            app.settings.fit_width = !on;
+        match clicked {
+            Some(0) => app.toggle_toc(),
+            Some(1) => app.toggle_minimap(ui.ctx()),
+            Some(2) => app.settings.fit_width = !app.settings.fit_width,
+            _ => {}
         }
     });
 
@@ -1000,6 +1151,76 @@ fn status_bar(ui: &mut Ui, app: &mut App, sel: Option<SelStats>) {
         [pos2(r.min.x, r.min.y), pos2(r.max.x, r.min.y)],
         egui::Stroke::new(1.0, pal.border),
     );
+}
+
+/// Плоская ручка растяжения панели навигации: линия на краю, обращённом к
+/// документу; перетаскивание меняет ширину (хранится в settings.json).
+fn resize_handle(
+    ui: &mut Ui,
+    salt: &'static str,
+    // Панель прижата к левому краю окна — тянем её правую границу.
+    panel_on_left: bool,
+    bounds: Rect,
+    pal: &themes::Palette,
+    width: &mut f32,
+    range: (f32, f32),
+) {
+    let edge = if panel_on_left { bounds.max.x } else { bounds.min.x };
+    // Хит-зона 10px вокруг линии — заходит и на документ, чтобы легко схватить.
+    let hit = Rect::from_min_max(
+        pos2(edge - 5.0, bounds.min.y),
+        pos2(edge + 5.0, bounds.max.y),
+    );
+    let resp = ui.interact(hit, ui.scope_id().with(salt), Sense::click_and_drag());
+    if resp.dragged() {
+        let dx = resp.drag_delta().x;
+        let d = if panel_on_left { dx } else { -dx };
+        *width = (*width + d).clamp(range.0, range.1);
+        ui.ctx().request_repaint();
+    }
+    let active = resp.hovered() || resp.dragged();
+    // Линию — на полпикселя ВНУТРИ панели: ровно на границе её срезал клип.
+    let line_x = if panel_on_left { edge - 0.5 } else { edge + 0.5 };
+    ui.painter().line_segment(
+        [pos2(line_x, bounds.min.y), pos2(line_x, bounds.max.y)],
+        egui::Stroke::new(1.0, if active { pal.muted } else { pal.border }),
+    );
+    if active {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+}
+
+/// Плоский тумблер статус-бара: рамка без заливки, состояние — текстом
+/// («вкл»/«выкл» в подписи). Возвращает true в кадр клика.
+fn status_toggle(
+    ui: &mut Ui,
+    salt: usize,
+    label: &str,
+    em: f32,
+    pal: &themes::Palette,
+    row_h: f32,
+) -> bool {
+    let g = crate::view::widgets::plain_galley(ui, label, em, pal.fg);
+    let w = g.size().x + 18.0;
+    let (r, _) = ui.allocate_exact_size(vec2(w, row_h - 8.0), Sense::hover());
+    let resp = ui.interact(r, ui.scope_id().with(("sb_toggle", salt)), Sense::click());
+    let hovered = resp.hovered();
+    let painter = ui.painter().clone();
+    let border = if hovered { pal.muted } else { pal.border };
+    painter.rect(
+        r,
+        egui::CornerRadius::same(0),
+        egui::Color32::TRANSPARENT,
+        egui::Stroke::new(1.0, border),
+        egui::StrokeKind::Middle,
+    );
+    let color = if hovered { pal.fg } else { pal.muted };
+    // painter.galley игнорирует цвет для «цветных» галлеев — только override.
+    painter.galley_with_override_text_color(r.center() - g.size() * 0.5, g, color);
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
 }
 
 /// Число с разделителями разрядов (пробел по 3 цифры).
@@ -1014,6 +1235,12 @@ fn fmt_num(n: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+/// Оценка времени чтения: слова / 220 сл-мин («чтение: N мин»).
+fn reading_time(words: usize, lang: Lang) -> String {
+    let mins = ((words as f64) / READ_WPM as f64).ceil() as usize;
+    t(lang, "read_min").replace("{}", &fmt_num(mins))
 }
 
 /// Размер файла: Б/КБ/МБ/ГБ (одна цифра после запятой).

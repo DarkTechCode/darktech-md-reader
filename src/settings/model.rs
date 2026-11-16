@@ -25,6 +25,13 @@ pub const WIDTH_MAX: u16 = 1280;
 pub const WIDTH_STEP: u16 = 20;
 /// Пресеты ширины колонки (Ctrl+1..3): узкая/средняя/широкая.
 pub const WIDTH_PRESETS: [u16; 3] = [640, 820, 1080];
+pub const TOC_LEVEL_MIN: u8 = 1;
+pub const TOC_LEVEL_MAX: u8 = 6;
+/// Ширины панелей навигации: дефолты и диапазоны растяжения (px).
+pub const TOC_WIDTH_DEFAULT: f32 = 260.0;
+pub const TOC_WIDTH_RANGE: (f32, f32) = (180.0, 560.0);
+pub const MM_WIDTH_DEFAULT: f32 = 152.0;
+pub const MM_WIDTH_RANGE: (f32, f32) = (64.0, 400.0);
 
 /// Тема интерфейса.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +49,23 @@ pub enum LangMode {
     Ru,
     En,
     System,
+}
+
+/// Режим панели (оглавление/миникарта): Авто — показывать, когда полезна.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PanelMode {
+    Auto,
+    On,
+    Off,
+}
+
+/// Сторона панели оглавления.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    Left,
+    Right,
 }
 
 /// Все настройки приложения. Дефолты — план §4.9; шрифт по умолчанию Sans —
@@ -70,6 +94,18 @@ pub struct SettingsData {
     pub code_line_numbers: bool,
     /// Подсветка синтаксиса в блоках кода.
     pub code_highlight: bool,
+    /// Оглавление: показывать (Авто — при достаточном числе заголовков).
+    pub toc_mode: PanelMode,
+    /// Сторона панели оглавления.
+    pub toc_side: Side,
+    /// Максимальный уровень заголовков в оглавлении, H1–H6.
+    pub toc_max_level: u8,
+    /// Миникарта-скелет (Авто — только для длинных документов).
+    pub minimap_mode: PanelMode,
+    /// Ширина панели оглавления, px (растягивается за границу).
+    pub toc_width: f32,
+    /// Ширина миникарты, px.
+    pub minimap_width: f32,
 }
 
 impl Default for SettingsData {
@@ -87,6 +123,12 @@ impl Default for SettingsData {
             table_top: false,
             code_line_numbers: false,
             code_highlight: true,
+            toc_mode: PanelMode::Auto,
+            toc_side: Side::Left,
+            toc_max_level: TOC_LEVEL_MAX,
+            minimap_mode: PanelMode::Auto,
+            toc_width: TOC_WIDTH_DEFAULT,
+            minimap_width: MM_WIDTH_DEFAULT,
         }
     }
 }
@@ -110,6 +152,13 @@ impl SettingsData {
         );
         let w = self.text_width.clamp(WIDTH_MIN, WIDTH_MAX) as f32 / WIDTH_STEP as f32;
         self.text_width = (w.round() as u16).saturating_mul(WIDTH_STEP);
+        self.toc_max_level = self.toc_max_level.clamp(TOC_LEVEL_MIN, TOC_LEVEL_MAX);
+        self.toc_width = self
+            .toc_width
+            .clamp(TOC_WIDTH_RANGE.0, TOC_WIDTH_RANGE.1);
+        self.minimap_width = self
+            .minimap_width
+            .clamp(MM_WIDTH_RANGE.0, MM_WIDTH_RANGE.1);
     }
 
     /// Типографика документа из настроек (для Env и LayoutKey).
@@ -157,6 +206,10 @@ mod tests {
         assert!(!d.table_top);
         assert!(!d.code_line_numbers);
         assert!(d.code_highlight);
+        assert_eq!(d.toc_mode, PanelMode::Auto);
+        assert_eq!(d.toc_side, Side::Left);
+        assert_eq!(d.toc_max_level, 6);
+        assert_eq!(d.minimap_mode, PanelMode::Auto);
     }
 
     #[test]
@@ -167,6 +220,7 @@ mod tests {
             text_width: 5000,
             letter_spacing: 9.0,
             ui_font_size: 0,
+            toc_max_level: 9,
             ..Default::default()
         };
         d.normalize();
@@ -175,6 +229,7 @@ mod tests {
         assert_eq!(d.text_width, 1280);
         assert!((d.letter_spacing - 2.0).abs() < 1e-6);
         assert_eq!(d.ui_font_size, 11);
+        assert_eq!(d.toc_max_level, 6);
 
         let mut d = SettingsData {
             line_height: 1.52,
@@ -207,6 +262,12 @@ mod tests {
         assert!(js.contains("\"tableTop\":false"));
         assert!(js.contains("\"codeLineNumbers\":false"));
         assert!(js.contains("\"codeHighlight\":true"));
+        assert!(js.contains("\"tocMode\":\"auto\""));
+        assert!(js.contains("\"tocSide\":\"left\""));
+        assert!(js.contains("\"tocMaxLevel\":6"));
+        assert!(js.contains("\"minimapMode\":\"auto\""));
+        assert!(js.contains("\"tocWidth\":260.0"));
+        assert!(js.contains("\"minimapWidth\":152.0"));
         assert_eq!(serde_json::from_str::<SettingsData>(&js).unwrap(), d);
     }
 

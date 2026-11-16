@@ -39,6 +39,8 @@ pub struct LayoutState {
     /// Накопленная коррекция скролла (высоты выше вьюпорта изменились).
     pending_scroll: f32,
     dirty: bool,
+    /// Растёт при любом изменении высот/ключа (инвалидация кэша миникарты).
+    version: u64,
 }
 
 impl Default for LayoutState {
@@ -52,6 +54,7 @@ impl Default for LayoutState {
             anchor: None,
             pending_scroll: 0.0,
             dirty: false,
+            version: 0,
         }
     }
 }
@@ -68,6 +71,7 @@ impl LayoutState {
             self.anchor = None;
             self.pending_scroll = 0.0;
             self.dirty = false;
+            self.version += 1;
         }
         let n = doc.blocks.len();
         if self.heights.len() < n {
@@ -76,6 +80,7 @@ impl LayoutState {
                 self.measured.push(false);
             }
             self.dirty = true;
+            self.version += 1;
         }
         if self.dirty || self.offsets.len() != n + 1 {
             self.rebuild_offsets();
@@ -99,12 +104,28 @@ impl LayoutState {
         self.offsets.last().copied().unwrap_or(0.0)
     }
 
-    pub fn height(&self, i: usize) -> f32 {
-        self.heights[i]
+    /// Версия раскладки: меняется при смене ключа/росте/перемерах высот.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
+    pub fn height(&self, i: usize) -> f32 {
+        self.heights[i.min(self.heights.len().saturating_sub(1))]
+    }
+
+    /// Верх блока i в координатах контента. Пустая раскладка (ensure ещё не
+    /// звался — панели навигации читают до первого кадра doc_view) → 0.
     pub fn offset(&self, i: usize) -> f32 {
-        self.offsets[i.min(self.offsets.len().saturating_sub(1))]
+        self.offsets
+            .get(i.min(self.offsets.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Число блоков, для которых есть высоты (после ensure; при стриминге
+    /// может отставать от doc.blocks.len() до ближайшего кадра doc_view).
+    pub fn blocks_len(&self) -> usize {
+        self.heights.len()
     }
 
     /// Диапазон блоков, пересекающих [top, bottom) в координатах контента.
@@ -124,6 +145,7 @@ impl LayoutState {
         if (self.heights[i] - h).abs() > 0.01 {
             self.heights[i] = h;
             self.dirty = true;
+            self.version += 1;
         }
     }
 

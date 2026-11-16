@@ -82,6 +82,12 @@ pub const LIGHT: Palette = Palette {
     alert_caution: rgb(207, 45, 38),
 };
 
+/// Осветление цвета к белому (для hover-состояний).
+pub fn lighten(c: Color32, k: f32) -> Color32 {
+    let ch = |v: u8| (v as f32 + (255.0 - v as f32) * k).round() as u8;
+    Color32::from_rgb(ch(c.r()), ch(c.g()), ch(c.b()))
+}
+
 /// Применяет палитру к визуальному стилю egui (панели, выделение, ссылки).
 pub fn apply(ctx: &Context, pal: &Palette, dark: bool) {
     let mut vis = if dark {
@@ -97,20 +103,26 @@ pub fn apply(ctx: &Context, pal: &Palette, dark: bool) {
     vis.selection.bg_fill = pal.selection;
     vis.widgets.noninteractive.bg_fill = pal.bg;
     vis.widgets.noninteractive.fg_stroke.color = pal.fg;
-    vis.widgets.inactive.bg_fill = pal.code_bg;
-    vis.widgets.hovered.bg_fill = pal.inline_code_bg;
+    // Цвет ручки скроллбара (egui берёт его из widgets.*.bg_fill).
+    vis.widgets.inactive.bg_fill = lighten(pal.code_bg, 0.14);
+    vis.widgets.hovered.bg_fill = lighten(pal.code_bg, 0.26);
+    vis.widgets.active.bg_fill = lighten(pal.code_bg, 0.32);
+    // Плоский стиль: без скруглений.
+    vis.widgets.inactive.corner_radius = egui::CornerRadius::same(0);
+    vis.widgets.hovered.corner_radius = egui::CornerRadius::same(0);
+    vis.widgets.active.corner_radius = egui::CornerRadius::same(0);
     ctx.set_visuals(vis);
 
     // Широкий «виндоузовый» скроллбар: сплошной, всегда видимый, легко схватить.
     ctx.all_styles_mut(|style| {
         style.spacing.scroll = egui::style::ScrollStyle {
             floating: false,
-            bar_width: 14.0,
-            handle_min_length: 28.0,
-            bar_inner_margin: 2.0,
+            bar_width: 20.0,
+            handle_min_length: 32.0,
+            bar_inner_margin: 1.0,
             bar_outer_margin: 0.0,
-            dormant_background_opacity: 0.25,
-            dormant_handle_opacity: 0.55,
+            dormant_background_opacity: 1.0,
+            dormant_handle_opacity: 1.0,
             ..egui::style::ScrollStyle::solid()
         };
     });

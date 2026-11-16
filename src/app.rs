@@ -313,7 +313,11 @@ fn tab_strip(ui: &mut Ui, app: &mut App) {
             if is_active {
                 painter.rect_filled(rect, egui::CornerRadius::same(0), pal.bg);
             } else if resp.hovered() {
-                painter.rect_filled(rect, egui::CornerRadius::same(0), pal.inline_code_bg);
+                painter.rect_filled(
+                    rect,
+                    egui::CornerRadius::same(0),
+                    themes::lighten(pal.code_bg, 0.35),
+                );
             }
             painter.galley(
                 pos2(rect.min.x + 14.0, rect.center().y - g.size().y * 0.5),

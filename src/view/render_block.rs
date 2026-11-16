@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use eframe::egui::{
-    self as egui, pos2, vec2, Align, Color32, CornerRadius, FontFamily, FontId, Layout, Rect,
+    self as egui, pos2, vec2, Color32, CornerRadius, FontFamily, FontId, Rect,
     Sense, Stroke, StrokeKind, Ui, Vec2,
 };
 use eframe::egui::epaint::text::VariationCoords;
@@ -15,10 +15,9 @@ use eframe::egui::text::{
 use crate::fonts;
 use crate::i18n::t;
 use crate::md::blocks::{Alert, Align as MdAlign, BlockKind, ListMarker, Span};
-use crate::view::widgets::flat_text_button;
 
 use super::doc_view::DocEvent;
-use super::themes::Palette;
+use super::themes::{lighten, Palette};
 use super::Env;
 
 /// Параметры LayoutJob для набора спанов.
@@ -141,14 +140,17 @@ fn put_text(
 
     let mut events = Vec::new();
     if let Some((url, r)) = &hover {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        // Пересобираем job с подсветкой ссылки (раскладка та же — ширины не меняются).
+        // Пересобираем job с подсветкой ссылки (расладка та же — ширины не меняются).
         ui.put(
             label_rect,
             egui::Label::new(Arc::new(spec.job(spans, pal, Some(url)))),
         );
         draw_url_tooltip(ui, url);
-        if ui.input(|i| i.pointer.primary_clicked()) && r.contains(ui.input(|i| i.pointer.hover_pos()).unwrap()) {
+        // Курсор ставим ПОСЛЕ Label, иначе перебьётся курсором выделения текста.
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if ui.input(|i| i.pointer.primary_clicked())
+            && r.contains(ui.input(|i| i.pointer.hover_pos()).unwrap())
+        {
             events.push(DocEvent::OpenLink(url.clone()));
         }
     } else {
@@ -208,12 +210,6 @@ fn char_starts(spans: &[Span]) -> Vec<usize> {
         acc += span.text.chars().count();
     }
     out
-}
-
-/// Осветление цвета к белому (для hover-состояний).
-fn lighten(c: Color32, k: f32) -> Color32 {
-    let ch = |v: u8| (v as f32 + (255.0 - v as f32) * k).round() as u8;
-    Color32::from_rgb(ch(c.r()), ch(c.g()), ch(c.b()))
 }
 
 fn plain_span(text: &str) -> Span {
@@ -512,7 +508,7 @@ fn draw_checkbox(
 
 fn show_code(ui: &mut Ui, idx: usize, lang: &Option<String>, code: &str, env: &Env) -> Vec<DocEvent> {
     let em = env.typo.size;
-    ui.add_space(0.5 * em);
+    ui.add_space(0.6 * em);
 
     let is_diagram = lang.as_deref() == Some("mermaid");
     let label = match lang {
@@ -532,60 +528,104 @@ fn show_code(ui: &mut Ui, idx: usize, lang: &Option<String>, code: &str, env: &E
 
     let pad = 12.0;
     let full_w = ui.available_width();
+    let header_h = 32.0;
     let code_h = galley.size().y + pad * 2.0;
 
-    ui.vertical(|ui| {
-        if !label.is_empty() {
-            ui.horizontal(|ui| {
-                let mut job = LayoutJob::default();
-                job.sections.push(LayoutSection {
-                    leading_space: 0.0,
-                    byte_range: ByteIndex(0)..ByteIndex(label.len()),
-                    format: TextFormat {
-                        font_id: FontId::new(em * 0.8, FontFamily::Name(fonts::MONO.into())),
-                        color: env.pal.muted,
-                        ..Default::default()
-                    },
-                });
-                job.text = label;
-                let g = ui.painter().layout_job(job);
-                let (r, _) =
-                    ui.allocate_exact_size(vec2(g.size().x, g.size().y + 4.0), Sense::hover());
-                ui.painter()
-                    .galley(pos2(r.min.x, r.center().y - g.size().y * 0.5), g, env.pal.muted);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if flat_text_button(
-                        ui,
-                        t(env.lang, "copy"),
-                        em * 0.78,
-                        env.pal.muted,
-                        env.pal.fg,
-                    ) {
-                        ui.ctx().copy_text(code.to_string());
-                    }
-                });
-            });
+    // Шапка блока: подпись языка слева, кнопка «копировать» справа — внутри блока.
+    let (hrect, _) = ui.allocate_exact_size(vec2(full_w, header_h), Sense::hover());
+    let painter = ui.painter().clone();
+    painter.rect(
+        hrect,
+        egui::CornerRadius::same(0),
+        env.pal.code_bg,
+        Stroke::NONE,
+        StrokeKind::Middle,
+    );
+    if !label.is_empty() {
+        let g = painter.layout_job(plain_job_mono(&label, em * 0.78, env.pal.muted));
+        painter.galley(
+            pos2(hrect.min.x + pad, hrect.center().y - g.size().y * 0.5),
+            g,
+            env.pal.muted,
+        );
+    }
+    {
+        // Кнопка в правом верхнем углу блока — абсолютное позиционирование.
+        let btn_g = painter.layout_job(plain_job_mono(t(env.lang, "copy"), em * 0.72, env.pal.fg));
+        let btn_size = btn_g.size() + vec2(16.0, 6.0);
+        let btn_rect = Rect::from_min_size(
+            pos2(hrect.max.x - pad - btn_size.x, hrect.center().y - btn_size.y * 0.5),
+            btn_size,
+        );
+        let btn_resp = ui.interact(
+            btn_rect,
+            ui.scope_id().with(("code_copy", idx)),
+            Sense::click(),
+        );
+        let hovered = btn_resp.hovered();
+        let painter2 = ui.painter().clone();
+        painter2.rect(
+            btn_rect,
+            egui::CornerRadius::same(0),
+            if hovered {
+                lighten(env.pal.code_bg, 0.5)
+            } else {
+                Color32::TRANSPARENT
+            },
+            Stroke::new(1.0, env.pal.border),
+            StrokeKind::Middle,
+        );
+        painter2.galley(
+            btn_rect.center() - btn_g.size() * 0.5,
+            btn_g,
+            if hovered { env.pal.fg } else { env.pal.muted },
+        );
+        if hovered {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        scroll_h(ui, ("code", idx), full_w, |ui| {
-            let content_w = galley.size().x + pad * 2.0;
-            let (rect, _) = ui.allocate_exact_size(vec2(content_w, code_h), Sense::hover());
-            let painter = ui.painter().clone();
-            painter.rect(
-                Rect::from_min_max(pos2(0.0, rect.min.y), pos2(full_w, rect.max.y)),
-                CornerRadius::same(6),
-                env.pal.code_bg,
-                Stroke::NONE,
-                StrokeKind::Middle,
-            );
-            let label_rect =
-                Rect::from_min_size(pos2(rect.min.x + pad, rect.min.y + pad), galley.size());
-            ui.put(
-                label_rect,
-                eframe::egui::Label::new(Arc::new(spec.job(&[plain_span(code)], env.pal, None))),
-            );
-        });
+        if btn_resp.clicked() {
+            ui.ctx().copy_text(code.to_string());
+        }
+    }
+
+    // Код: фон тянется шире контента, чтобы не «уезжал» при горизонтальном скролле.
+    scroll_h(ui, ("code", idx), full_w, |ui| {
+        let content_w = galley.size().x + pad * 2.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(content_w, code_h), Sense::hover());
+        let painter = ui.painter();
+        painter.rect(
+            Rect::from_min_max(
+                pos2(rect.min.x - 100_000.0, rect.min.y),
+                pos2(rect.max.x + 100_000.0, rect.max.y),
+            ),
+            egui::CornerRadius::same(0),
+            env.pal.code_bg,
+            Stroke::NONE,
+            StrokeKind::Middle,
+        );
+        let label_rect = Rect::from_min_size(pos2(rect.min.x + pad, rect.min.y + pad), galley.size());
+        ui.put(
+            label_rect,
+            egui::Label::new(Arc::new(spec.job(&[plain_span(code)], env.pal, None))),
+        );
     });
+    ui.add_space(0.6 * em);
     Vec::new()
+}
+
+fn plain_job_mono(text: &str, size: f32, color: Color32) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    job.sections.push(LayoutSection {
+        leading_space: 0.0,
+        byte_range: ByteIndex(0)..ByteIndex(text.len()),
+        format: TextFormat {
+            font_id: FontId::new(size, FontFamily::Name(fonts::MONO.into())),
+            color,
+            ..Default::default()
+        },
+    });
+    job.text.push_str(text);
+    job
 }
 
 fn scroll_h(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, max_w: f32, content: impl FnOnce(&mut Ui)) {

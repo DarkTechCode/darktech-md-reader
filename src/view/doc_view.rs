@@ -1,11 +1,12 @@
 //! Область документа: скролл + центрированная колонка типографики.
 //! Этап 0 — наивный рендер всех блоков; этап 1 заменит на виртуализацию.
 
-use eframe::egui::{self, pos2, Color32, Id, Rect, ScrollArea, Sense, Stroke, Ui, Vec2};
+use eframe::egui::{self, pos2, vec2, Color32, Id, Rect, ScrollArea, Sense, Stroke, Ui, Vec2};
 
 use crate::md::blocks::Doc;
 
 use super::render_block::show_block;
+use super::themes::lighten;
 use super::Env;
 
 /// Событие из документа (клик по ссылке и т.п.).
@@ -15,7 +16,12 @@ pub enum DocEvent {
 }
 
 const FAB_SIZE: f32 = 44.0;
-const FAB_MARGIN: f32 = 20.0;
+const FAB_MARGIN_BOTTOM: f32 = 20.0;
+/// Справа — с учётом ширины скроллбара, чтобы зазор был как снизу.
+const FAB_MARGIN_RIGHT: f32 = FAB_MARGIN_BOTTOM + 26.0;
+const FAB_BG: Color32 = Color32::from_rgb(0x22, 0x22, 0x26);
+const FAB_CHEVRON: Color32 = Color32::from_rgb(0x6D, 0x6D, 0x6C);
+const FAB_ACCENT: Color32 = Color32::from_rgb(64, 140, 255);
 
 pub fn show(ui: &mut Ui, doc: &Doc, env: &Env) -> Vec<DocEvent> {
     let mut events = Vec::new();
@@ -32,7 +38,10 @@ pub fn show(ui: &mut Ui, doc: &Doc, env: &Env) -> Vec<DocEvent> {
                 }
                 v
             }) {
-                ui.scroll_to_rect(Rect::ZERO, None);
+                ui.scroll_to_rect(
+                    Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 10.0)),
+                    Some(egui::Align::Min),
+                );
             }
 
             ui.add_space(20.0);
@@ -68,8 +77,8 @@ pub fn show(ui: &mut Ui, doc: &Doc, env: &Env) -> Vec<DocEvent> {
 fn show_fab(ui: &mut Ui, progress: f32, scroll_top_id: Id) {
     let bounds = ui.max_rect();
     let min = pos2(
-        bounds.max.x - FAB_MARGIN - FAB_SIZE,
-        bounds.max.y - FAB_MARGIN - FAB_SIZE,
+        bounds.max.x - FAB_MARGIN_RIGHT - FAB_SIZE,
+        bounds.max.y - FAB_MARGIN_BOTTOM - FAB_SIZE,
     );
     let rect = Rect::from_min_size(min, Vec2::splat(FAB_SIZE));
     let resp = ui.interact(rect, ui.scope_id().with("fab"), Sense::click());
@@ -77,14 +86,15 @@ fn show_fab(ui: &mut Ui, progress: f32, scroll_top_id: Id) {
     let center = rect.center();
     let radius = FAB_SIZE * 0.5;
 
-    let weak = ui.style().visuals.weak_text_color();
-    let strong = ui.style().visuals.strong_text_color();
-    let panel_fill = ui.style().visuals.panel_fill;
+    // Тёмный фон, при наведении — чуть светлее.
+    let bg = if resp.hovered() {
+        lighten(FAB_BG, 0.35)
+    } else {
+        FAB_BG
+    };
+    painter.circle(center, radius, bg, Stroke::NONE);
 
-    // Фон и «спокойная» обводка.
-    painter.circle(center, radius, panel_fill, Stroke::new(1.0, weak));
     // Обводка-прогресс: ярко-синяя дуга, полный круг в самом низу.
-    let accent = Color32::from_rgb(64, 140, 255);
     let a0 = -std::f32::consts::FRAC_PI_2;
     let sweep = std::f32::consts::TAU * progress.clamp(0.0, 1.0);
     let steps = ((progress * 64.0).ceil() as usize).max(2);
@@ -94,33 +104,27 @@ fn show_fab(ui: &mut Ui, progress: f32, scroll_top_id: Id) {
             pos2(center.x + radius * a.cos(), center.y + radius * a.sin())
         })
         .collect();
-    painter.add(egui::Shape::line(pts, Stroke::new(3.0, accent)));
+    painter.add(egui::Shape::line(pts, Stroke::new(3.0, FAB_ACCENT)));
 
-    // Стрелка вверх.
+    // Шеврон вверх.
     let s = radius * 0.42;
     painter.line_segment(
         [
             pos2(center.x - s, center.y + s * 0.4),
             pos2(center.x, center.y - s * 0.6),
         ],
-        Stroke::new(2.5, strong),
+        Stroke::new(2.5, FAB_CHEVRON),
     );
     painter.line_segment(
         [
             pos2(center.x, center.y - s * 0.6),
             pos2(center.x + s, center.y + s * 0.4),
         ],
-        Stroke::new(2.5, strong),
+        Stroke::new(2.5, FAB_CHEVRON),
     );
 
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        painter.circle(
-            center,
-            radius,
-            Color32::from_white_alpha(10),
-            Stroke::NONE,
-        );
     }
     if resp.clicked() {
         ui.ctx().data_mut(|d| d.insert_temp(scroll_top_id, true));

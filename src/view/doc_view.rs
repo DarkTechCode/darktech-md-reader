@@ -1,12 +1,16 @@
-//! Область документа: скролл + центрированная колонка типографики.
-//! Этап 0 — наивный рендер всех блоков; этап 1 заменит на виртуализацию.
+//! Область документа: виртуальный скролл. Рендерится только видимое окно
+//! блоков ± overscan; высоты — измеренные и оценённые (префикс-суммы в
+//! LayoutState), скроллбар уточняется по мере измерения.
 
-use eframe::egui::{self, pos2, Color32, Id, Rect, ScrollArea, Sense, Stroke, Ui, Vec2};
+use eframe::egui::{
+    self, pos2, scroll_area, Color32, Id, Rect, ScrollArea, Sense, Stroke, Ui, Vec2,
+};
 
+use crate::layout::{measure, LayoutKey, LayoutState};
 use crate::md::blocks::Doc;
 
-use super::render_block::show_block;
-use super::themes::lighten;
+use super::render;
+use super::themes::{self, lighten};
 use super::Env;
 
 /// Событие из документа (клик по ссылке и т.п.).
@@ -14,6 +18,11 @@ use super::Env;
 pub enum DocEvent {
     OpenLink(String),
 }
+
+/// Запас рендера сверху/снизу от вьюпорта, px.
+const OVERSCAN: f32 = 600.0;
+const TOP_PAD: f32 = 20.0;
+const BOTTOM_PAD: f32 = 40.0;
 
 const FAB_SIZE: f32 = 44.0;
 const FAB_MARGIN_BOTTOM: f32 = 20.0;
@@ -23,50 +32,97 @@ const FAB_BG: Color32 = Color32::from_rgb(0x22, 0x22, 0x26);
 const FAB_CHEVRON: Color32 = Color32::from_rgb(0x6D, 0x6D, 0x6C);
 const FAB_ACCENT: Color32 = Color32::from_rgb(64, 140, 255);
 
-pub fn show(ui: &mut Ui, doc: &Doc, env: &Env) -> Vec<DocEvent> {
+pub fn show(
+    ui: &mut Ui,
+    doc: &Doc,
+    layout: &mut LayoutState,
+    env: &Env,
+    tab_key: u64,
+) -> Vec<DocEvent> {
     let mut events = Vec::new();
-    let scroll_top_id = ui.scope_id().with("scroll_top");
+    // Тот же id, что у ScrollArea (make_persistent_id = scope_id.with(salt)).
+    let scroll_id = ui.scope_id().with(("doc_scroll", tab_key));
+    let fab_id = ui.scope_id().with(("fab_top", tab_key));
 
-    let out = ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show_viewport(ui, |ui, viewport| {
-            // Просьба «наверх»: скроллируем к курсору = началу контента
-            // (scroll_to_rect ждёт экранные координаты, поэтому не подходит).
-            if ui.ctx().data_mut(|d| {
-                let v = d.get_temp::<bool>(scroll_top_id).unwrap_or(false);
-                if v {
-                    d.insert_temp(scroll_top_id, false);
-                }
-                v
-            }) {
-                ui.scroll_to_cursor(Some(egui::Align::Min));
+    // Принудительный оффсет этого кадра: просьба «наверх» или компенсация
+    // «прилипания» (высоты выше вьюпорта изменились — держим контент на месте).
+    let mut forced: Option<f32> = None;
+    let to_top = ui.ctx().data_mut(|d| {
+        let v = d.get_temp::<bool>(fab_id).unwrap_or(false);
+        if v {
+            d.insert_temp(fab_id, false);
+        }
+        v
+    });
+    if to_top {
+        forced = Some(0.0);
+    } else if let Some(delta) = layout.take_pending_scroll() {
+        let cur = scroll_area::State::load(ui.ctx(), scroll_id)
+            .map(|s| s.clamped_offset().y)
+            .unwrap_or(0.0);
+        forced = Some((cur + delta).max(0.0));
+    }
+
+    let mut sa = ScrollArea::vertical()
+        .id_salt(("doc_scroll", tab_key))
+        .auto_shrink([false, false]);
+    if let Some(off) = forced {
+        sa = sa.vertical_scroll_offset(off);
+    }
+
+    let out = sa.show_viewport(ui, |ui, viewport| {
+        let avail = ui.available_width();
+        let col = env.typo.width.min(avail).max(300.0);
+        layout.ensure(
+            doc,
+            LayoutKey {
+                typo: *env.typo,
+                width: col,
+                dark: env.pal.bg == themes::DARK.bg,
+            },
+        );
+
+        // origin = экранная позиция контента (0,0); viewport — координаты контента.
+        let origin = ui.cursor().min;
+        ui.set_min_height(TOP_PAD + layout.total_height() + BOTTOM_PAD);
+
+        let side = ((avail - col) / 2.0).max(0.0).floor();
+        let x0 = origin.x + side;
+        let vis = viewport.translate(origin.to_vec2());
+        let i0 = layout
+            .visible_range(viewport.min.y - OVERSCAN, viewport.max.y + OVERSCAN)
+            .start;
+
+        let mut y = origin.y + TOP_PAD + layout.offset(i0);
+        for i in layout.visible_range(viewport.min.y - OVERSCAN, viewport.max.y + OVERSCAN) {
+            let block = &doc.blocks[i];
+            if layout.prepared(i).is_none() {
+                let (p, h) = measure::measure_block(ui, env, col, block);
+                layout.set_measured(i, h);
+                layout.put_prepared(i, p);
             }
+            let h = layout.height(i);
+            let rect = Rect::from_min_size(pos2(x0, y), Vec2::new(col, h));
+            let prep = layout.prepared_mut(i).expect("prepared только что создан");
+            let (ev, new_h) = render::render_block(ui, rect, vis, tab_key, i, block, prep, env);
+            if let Some(h) = new_h {
+                layout.set_measured(i, h);
+            }
+            events.extend(ev);
+            y += layout.height(i);
+        }
 
-            ui.add_space(20.0);
-            let avail = ui.available_width();
-            let col = env.typo.width.min(avail).max(300.0);
-            let side = ((avail - col) / 2.0).max(0.0).floor();
-            ui.horizontal(|ui| {
-                ui.add_space(side);
-                ui.vertical(|ui| {
-                    ui.set_max_width(col);
-                    for (idx, block) in doc.blocks.iter().enumerate() {
-                        events.extend(show_block(ui, idx, block, env));
-                    }
-                });
-            });
-            ui.add_space(40.0);
+        if layout.finish_frame(i0) {
+            ui.ctx().request_repaint();
+        }
+    });
 
-            // Прогресс прокрутки: насколько далеко от начала документа.
-            let content_h = ui.min_rect().height().max(1.0);
-            let scrollable = (content_h - viewport.height()).max(0.0);
-            let scrolled = viewport.min.y.min(scrollable);
-            scrolled / scrollable.max(1.0)
-        });
-
-    let progress = out.inner;
+    // Прогресс прокрутки: насколько далеко от начала документа.
+    let offset = out.state.clamped_offset().y;
+    let scrollable = (out.content_size.y - out.inner_rect.height()).max(1.0);
+    let progress = (offset / scrollable).clamp(0.0, 1.0);
     if progress > 0.001 {
-        show_fab(ui, progress, scroll_top_id);
+        show_fab(ui, progress, fab_id);
     }
     events
 }

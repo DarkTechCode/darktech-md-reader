@@ -137,7 +137,7 @@ pub enum FontChoice {
 }
 
 /// Типографика документа (все опции из панели настроек чтения).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Typo {
     pub font: FontChoice,
     /// Размер шрифта, px.

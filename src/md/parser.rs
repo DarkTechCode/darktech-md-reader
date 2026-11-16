@@ -1,13 +1,84 @@
 //! pulldown-cmark → плоский вектор блоков.
 //! Контейнеры (цитаты, списки) «разглаживаются»: вложенное содержимое становится
 //! отдельными блоками с метаданными глубины/маркера.
+//! Большие файлы разбираются в фоновом потоке чанками (стриминг в UI).
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::Sender;
 
 use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use super::blocks::{Align, Alert, BlockKind, Doc, Fmt, Heading, ListMarker, Span, TableRow};
+
+/// Файлы меньше этого размера читаются и разбираются синхронно (мгновенно).
+pub const SYNC_LIMIT: u64 = 1 << 20;
+/// Блоков в одном чанке стриминга.
+pub const CHUNK_BLOCKS: usize = 512;
+
+/// Сообщение фонового разбора.
+pub enum ParseMsg {
+    Chunk {
+        blocks: Vec<BlockKind>,
+        headings: Vec<Heading>,
+    },
+    Done {
+        word_count: usize,
+        /// Исходный текст возвращается в UI по готовности (Arc — дёшево).
+        source: Arc<str>,
+    },
+    Failed(String),
+}
+
+/// Читает файл как UTF-8 (с BOM); CRLF/LF не важны.
+pub fn read_text(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let mut text =
+        String::from_utf8(bytes).map_err(|_| format!("{}: не UTF-8", path.display()))?;
+    if text.starts_with('\u{FEFF}') {
+        text.replace_range(0..3, "");
+    }
+    Ok(text)
+}
+
+/// Фоновая загрузка большого файла: чтение + разбор в потоке, блоки
+/// приходят чанками; в конце — весь исходник и счётчик слов.
+pub fn parse_background(path: PathBuf, tx: Sender<ParseMsg>) {
+    std::thread::spawn(move || {
+        let text = match read_text(&path) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = tx.send(ParseMsg::Failed(e));
+                return;
+            }
+        };
+        let source: Arc<str> = Arc::from(text.as_str());
+        let mut st = State::new();
+        for (event, range) in Parser::new_ext(&source, opts()).into_offset_iter() {
+            handle_event(&mut st, event, range);
+            if st.blocks.len() >= CHUNK_BLOCKS && !st.send_chunk(&tx) {
+                return; // вкладку закрыли — бросаем разбор
+            }
+        }
+        st.send_chunk(&tx);
+        let _ = tx.send(ParseMsg::Done {
+            word_count: source.split_whitespace().count(),
+            source,
+        });
+    });
+}
+
+fn opts() -> Options {
+    let mut opts = Options::empty();
+    opts.insert(
+        Options::ENABLE_TABLES
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_GFM,
+    );
+    opts
+}
 
 /// Модификатор inline-контекста (стек: жирный внутри ссылки и т.п.).
 #[derive(Clone, Debug)]
@@ -63,39 +134,52 @@ struct State {
     /// Внутри alt такой картинки.
     in_img_alt: bool,
     para_has_other: bool,
+    /// Блоков уже отправлено чанками (block_idx заголовков — сквозной).
+    blocks_sent: usize,
+}
+
+impl State {
+    fn new() -> Self {
+        Self {
+            blocks: Vec::new(),
+            headings: Vec::new(),
+            spans: Vec::new(),
+            inline: Vec::new(),
+            lists: Vec::new(),
+            quote_depth: 0,
+            alert: None,
+            heading: None,
+            code: None,
+            html: String::new(),
+            in_html_block: false,
+            table: None,
+            para_img: None,
+            in_img_alt: false,
+            para_has_other: false,
+            blocks_sent: 0,
+        }
+    }
+
+    /// Отправляет накопленные блокы чанком. false — приёмник умер (вкладку закрыли).
+    fn send_chunk(&mut self, tx: &Sender<ParseMsg>) -> bool {
+        if self.blocks.is_empty() {
+            return true;
+        }
+        let n = self.blocks.len();
+        let msg = ParseMsg::Chunk {
+            blocks: std::mem::take(&mut self.blocks),
+            headings: std::mem::take(&mut self.headings),
+        };
+        self.blocks_sent += n;
+        tx.send(msg).is_ok()
+    }
 }
 
 pub fn parse(source: Arc<str>) -> Doc {
-    let mut opts = Options::empty();
-    opts.insert(
-        Options::ENABLE_TABLES
-            | Options::ENABLE_STRIKETHROUGH
-            | Options::ENABLE_TASKLISTS
-            | Options::ENABLE_GFM,
-    );
-
-    let mut st = State {
-        blocks: Vec::new(),
-        headings: Vec::new(),
-        spans: Vec::new(),
-        inline: Vec::new(),
-        lists: Vec::new(),
-        quote_depth: 0,
-        alert: None,
-        heading: None,
-        code: None,
-        html: String::new(),
-        in_html_block: false,
-        table: None,
-        para_img: None,
-        in_img_alt: false,
-        para_has_other: false,
-    };
-
-    for (event, range) in Parser::new_ext(&source, opts).into_offset_iter() {
+    let mut st = State::new();
+    for (event, range) in Parser::new_ext(&source, opts()).into_offset_iter() {
         handle_event(&mut st, event, range);
     }
-
     Doc {
         word_count: source.split_whitespace().count(),
         source,
@@ -351,7 +435,8 @@ fn flush_heading(st: &mut State) {
     st.headings.push(Heading {
         level,
         text,
-        block_idx: st.blocks.len(),
+        // Сквозной индекс: блоки частично уже отправлены чанками.
+        block_idx: st.blocks_sent + st.blocks.len(),
     });
     st.blocks.push(BlockKind::Heading {
         level,

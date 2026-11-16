@@ -1,18 +1,21 @@
 //! Состояние приложения: вкладки, ввод (CLI/drag-drop/Ctrl+O), панели.
+//! Большие файлы грузятся фоном: UI показывает блоки по мере разбора.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::Receiver;
 
 use eframe::egui::{
-    self, pos2, vec2, Context, FontFamily, FontId, Frame, Key, Modifiers, Rect, Sense, Ui,
+    self, pos2, vec2, Context, FontFamily, Frame, Key, Modifiers, Rect, Sense, Ui,
     ViewportCommand,
 };
 use eframe::egui::epaint::text::VariationCoords;
 use eframe::egui::text::{ByteIndex, Galley, LayoutJob, LayoutSection, TextFormat};
 
 use crate::i18n::{system_lang, t, Lang};
+use crate::layout::LayoutState;
 use crate::md::blocks::Doc;
-use crate::md::parser;
+use crate::md::parser::{self, ParseMsg};
 use crate::view::widgets::flat_text_button;
 use crate::view::{doc_view, themes, welcome, Env};
 use crate::fonts;
@@ -23,44 +26,70 @@ pub struct App {
     lang: Lang,
     typo: themes::Typo,
     dark: bool,
+    /// Счётчик id вкладок (стабильные id скроллов/блоков на переключение вкладок).
+    next_tab_id: u64,
     /// Последний выставленный заголовок окна (чтобы не спамить командой).
     title_sent: String,
 }
 
 pub struct Tab {
+    /// Стабильный id вкладки (id скролла и блоков привязаны к нему).
+    pub id: u64,
     pub path: Option<PathBuf>,
-    pub doc: Option<Arc<Doc>>,
-    pub error: Option<String>,
+    pub state: TabState,
+    /// Раскладка документа этой вкладки (высоты, кэш galley).
+    pub layout: LayoutState,
+}
+
+pub enum TabState {
+    Welcome,
+    Error(String),
+    /// Фоновая загрузка: документ растёт чанками.
+    Loading {
+        doc: Doc,
+        rx: Receiver<ParseMsg>,
+    },
+    Ready(Arc<Doc>),
 }
 
 impl Tab {
-    fn welcome() -> Self {
+    fn welcome(id: u64) -> Self {
         Self {
+            id,
             path: None,
-            doc: None,
-            error: None,
+            state: TabState::Welcome,
+            layout: LayoutState::default(),
         }
     }
 
-    fn load(path: PathBuf) -> Self {
-        match read_text(&path) {
-            Ok(text) => Self {
-                doc: Some(Arc::new(parser::parse(Arc::from(text.as_str())))),
-                path: Some(path),
-                error: None,
-            },
-            Err(e) => Self {
-                doc: None,
-                path: Some(path),
-                error: Some(e),
-            },
+    /// Маленькие файлы — синхронно (мгновенно), большие — фоновым потоком.
+    fn load(id: u64, path: PathBuf) -> Self {
+        let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        let state = if size < parser::SYNC_LIMIT {
+            match parser::read_text(&path) {
+                Ok(text) => TabState::Ready(Arc::new(parser::parse(Arc::from(text.as_str())))),
+                Err(e) => TabState::Error(e),
+            }
+        } else {
+            let (tx, rx) = std::sync::mpsc::channel();
+            parser::parse_background(path.clone(), tx);
+            TabState::Loading {
+                doc: Doc::empty(),
+                rx,
+            }
+        };
+        Self {
+            id,
+            path: Some(path),
+            state,
+            layout: LayoutState::default(),
         }
     }
 
     fn title(&self, lang: Lang) -> String {
         match &self.path {
             Some(p) => p
-                .file_stem()
+                .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| p.to_string_lossy().into_owned()),
             None => t(lang, "welcome_title").to_string(),
@@ -68,14 +97,31 @@ impl Tab {
     }
 }
 
-/// Читает файл как UTF-8 (с BOM); CRLF/LF не важны.
-fn read_text(path: &std::path::Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    let mut text = String::from_utf8(bytes).map_err(|_| format!("{}: не UTF-8", path.display()))?;
-    if text.starts_with('\u{FEFF}') {
-        text.replace_range(0..3, "");
+/// Результат прокачки канала фоновой загрузки за кадр.
+enum Pumped {
+    Still,
+    Done {
+        word_count: usize,
+        source: Arc<str>,
+    },
+    Failed(String),
+}
+
+fn pump_rx(rx: &Receiver<ParseMsg>, doc: &mut Doc) -> Pumped {
+    let mut res = Pumped::Still;
+    while let Ok(msg) = rx.try_recv() {
+        match msg {
+            ParseMsg::Chunk { blocks, headings } => {
+                doc.blocks.extend(blocks);
+                doc.headings.extend(headings);
+            }
+            ParseMsg::Done { word_count, source } => {
+                res = Pumped::Done { word_count, source }
+            }
+            ParseMsg::Failed(e) => res = Pumped::Failed(e),
+        }
     }
-    Ok(text)
+    res
 }
 
 impl App {
@@ -92,9 +138,17 @@ impl App {
             dark,
         );
 
-        let mut tabs: Vec<Tab> = paths.into_iter().map(Tab::load).collect();
+        let mut next_id = 0;
+        let mut tabs: Vec<Tab> = paths
+            .into_iter()
+            .map(|p| {
+                let tab = Tab::load(next_id, p);
+                next_id += 1;
+                tab
+            })
+            .collect();
         if tabs.is_empty() {
-            tabs.push(Tab::welcome());
+            tabs.push(Tab::welcome(next_id));
         }
 
         Self {
@@ -103,6 +157,7 @@ impl App {
             lang,
             typo: themes::Typo::default(),
             dark,
+            next_tab_id: next_id + 1,
             title_sent: String::new(),
         }
     }
@@ -115,11 +170,39 @@ impl App {
         }
     }
 
+    /// Прокачивает фоновые загрузки всех вкладок; true — пока есть живые.
+    fn pump_tabs(&mut self, ctx: &Context) -> bool {
+        let mut loading = false;
+        for tab in &mut self.tabs {
+            let mut finished: Option<TabState> = None;
+            if let TabState::Loading { doc, rx } = &mut tab.state {
+                match pump_rx(rx, doc) {
+                    Pumped::Still => loading = true,
+                    Pumped::Done { word_count, source } => {
+                        doc.word_count = word_count;
+                        doc.source = source;
+                        let full = std::mem::replace(doc, Doc::empty());
+                        finished = Some(TabState::Ready(Arc::new(full)));
+                    }
+                    Pumped::Failed(e) => finished = Some(TabState::Error(e)),
+                }
+            }
+            if let Some(state) = finished {
+                tab.state = state;
+            }
+        }
+        if loading {
+            ctx.request_repaint();
+        }
+        loading
+    }
+
     /// Открывает файл новой вкладкой (или заменяет единственную welcome-вкладку).
     fn open(&mut self, path: PathBuf) {
         let replace_welcome = self.tabs.len() == 1 && self.tabs[0].path.is_none();
-        let tab = Tab::load(path);
-        let has_content = tab.doc.is_some() || tab.error.is_some();
+        let tab = Tab::load(self.next_tab_id, path);
+        self.next_tab_id += 1;
+        let has_content = !matches!(tab.state, TabState::Welcome);
         if replace_welcome {
             self.tabs[0] = tab;
             self.active = 0;
@@ -133,7 +216,8 @@ impl App {
         if idx < self.tabs.len() {
             self.tabs.remove(idx);
             if self.tabs.is_empty() {
-                self.tabs.push(Tab::welcome());
+                self.tabs.push(Tab::welcome(self.next_tab_id));
+                self.next_tab_id += 1;
             }
             self.active = self.active.min(self.tabs.len() - 1);
         }
@@ -251,6 +335,7 @@ impl eframe::App for App {
         }
 
         self.handle_input(&ctx);
+        self.pump_tabs(&ctx);
 
         egui::Panel::top("tab_strip")
             .resizable(false)
@@ -268,28 +353,56 @@ impl eframe::App for App {
         };
 
         let mut link_events: Vec<String> = Vec::new();
+        let mut welcome_clicked = false;
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(pal.bg))
             .show(ui, |ui| {
-                let Some(tab) = self.tabs.get(self.active) else {
+                let Some(tab) = self.tabs.get_mut(self.active) else {
                     return;
                 };
-                if let Some(err) = &tab.error {
-                    show_error(ui, tab, err, env.lang);
-                } else if let Some(doc) = &tab.doc {
-                    for ev in doc_view::show(ui, doc, &env) {
-                        match ev {
-                            doc_view::DocEvent::OpenLink(url) => link_events.push(url),
+                let Tab {
+                    id,
+                    state,
+                    layout,
+                    path,
+                    ..
+                } = tab;
+                match state {
+                    TabState::Error(err) => {
+                        show_error(ui, path, err, env.lang);
+                    }
+                    TabState::Welcome => {
+                        welcome_clicked = welcome::show(ui, env.lang);
+                    }
+                    TabState::Loading { doc, .. } => {
+                        if doc.blocks.is_empty() {
+                            show_loading(ui, env.lang);
+                        } else {
+                            for ev in doc_view::show(ui, doc, layout, &env, *id) {
+                                match ev {
+                                    doc_view::DocEvent::OpenLink(url) => {
+                                        link_events.push(url)
+                                    }
+                                }
+                            }
                         }
                     }
-                } else if welcome::show(ui, env.lang) {
-                    if let Some(path) = pick_md_file() {
-                        self.open(path);
+                    TabState::Ready(arc) => {
+                        for ev in doc_view::show(ui, arc, layout, &env, *id) {
+                            match ev {
+                                doc_view::DocEvent::OpenLink(url) => link_events.push(url),
+                            }
+                        }
                     }
                 }
             });
         for url in link_events {
             self.open_link(&url, &ctx);
+        }
+        if welcome_clicked {
+            if let Some(path) = pick_md_file() {
+                self.open(path);
+            }
         }
 
         self.sync_title(&ctx);
@@ -304,9 +417,11 @@ enum TabAction {
 }
 
 /// Плоские вкладки без скруглений: активная подсвечена заливкой фона читалки.
+/// Текст — размера ссылок в документе, имя файла с расширением.
 fn tab_strip(ui: &mut Ui, app: &mut App) {
     let pal = *app.pal();
-    let h = 46.0;
+    let h = 40.0;
+    let text_size = 18.0;
     let mut actions: Vec<TabAction> = Vec::new();
 
     ui.horizontal(|ui| {
@@ -315,9 +430,9 @@ fn tab_strip(ui: &mut Ui, app: &mut App) {
         let active = app.active;
         for (i, title) in titles.iter().enumerate() {
             let is_active = i == active;
-            let g = title_galley(ui, title, is_active, &pal, 24.0);
-            let close_w = 32.0;
-            let w = g.size().x + 14.0 * 2.0 + close_w;
+            let g = title_galley(ui, title, is_active, &pal, text_size);
+            let close_w = 28.0;
+            let w = g.size().x + 12.0 * 2.0 + close_w;
             let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
             let painter = ui.painter();
             if is_active {
@@ -336,13 +451,13 @@ fn tab_strip(ui: &mut Ui, app: &mut App) {
                 );
             }
             painter.galley(
-                pos2(rect.min.x + 14.0, rect.center().y - g.size().y * 0.5),
+                pos2(rect.min.x + 12.0, rect.center().y - g.size().y * 0.5),
                 g,
                 if is_active { pal.fg } else { pal.muted },
             );
 
             // Крестик закрытия — отдельная зона клика.
-            let xg = title_galley(ui, "×", false, &pal, 22.0);
+            let xg = title_galley(ui, "×", false, &pal, 16.0);
             let x_min = pos2(
                 rect.max.x - close_w + (close_w - xg.size().x) * 0.5,
                 rect.center().y - xg.size().y * 0.5,
@@ -365,7 +480,7 @@ fn tab_strip(ui: &mut Ui, app: &mut App) {
             }
         }
         ui.add_space(4.0);
-        if flat_text_button(ui, "+", 24.0, pal.muted, pal.fg) {
+        if flat_text_button(ui, "+", text_size, pal.muted, pal.fg) {
             actions.push(TabAction::NewTab);
         }
     });
@@ -396,10 +511,10 @@ fn title_galley(
     bold: bool,
     pal: &themes::Palette,
     size: f32,
-) -> std::sync::Arc<Galley> {
+) -> Arc<Galley> {
     let mut job = LayoutJob::default();
     let mut fmt = TextFormat {
-        font_id: FontId::new(size, FontFamily::Proportional),
+        font_id: eframe::egui::FontId::new(size, FontFamily::Proportional),
         color: if bold { pal.fg } else { pal.muted },
         ..Default::default()
     };
@@ -415,13 +530,19 @@ fn title_galley(
     ui.painter().layout_job(job)
 }
 
-fn show_error(ui: &mut Ui, tab: &Tab, err: &str, lang: Lang) {
+fn show_loading(ui: &mut Ui, lang: Lang) {
+    ui.vertical_centered(|ui| {
+        ui.add_space(ui.available_height() * 0.3);
+        ui.label(egui::RichText::new(t(lang, "loading")).size(20.0).weak());
+    });
+}
+
+fn show_error(ui: &mut Ui, path: &Option<PathBuf>, err: &str, lang: Lang) {
     ui.vertical_centered(|ui| {
         ui.add_space(ui.available_height() * 0.3);
         ui.label(egui::RichText::new(t(lang, "err_read")).size(20.0).strong());
         ui.add_space(8.0);
-        let path = tab
-            .path
+        let path = path
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default();

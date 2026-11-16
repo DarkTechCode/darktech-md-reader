@@ -22,6 +22,9 @@ eframe = { version = "0.37", default-features = false, features = [
     "default_fonts",
 ] }
 pulldown-cmark = { version = "0.13", features = ["simd"] }
+# Запись в клипборд из фонового потока: синхронный SetClipboardData может
+# блокировать навсегда (broadcast всем окнам, включая зависшие).
+arboard = { version = "3.7", default-features = false, features = ["windows-sys"] }
 rfd = "0.15"
 sys-locale = "0.3"
 env_logger = "0.11"

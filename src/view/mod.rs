@@ -1,7 +1,7 @@
 //! Отрисовка документа.
 
 pub mod doc_view;
-pub mod render_block;
+pub mod render;
 pub mod themes;
 pub mod widgets;
 pub mod welcome;

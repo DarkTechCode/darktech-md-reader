@@ -14,6 +14,18 @@ pub struct Doc {
     pub word_count: usize,
 }
 
+impl Doc {
+    /// Пустой документ-заготовка (растёт по чанкам при фоновой загрузке).
+    pub fn empty() -> Self {
+        Self {
+            source: Arc::from(""),
+            blocks: Vec::new(),
+            headings: Vec::new(),
+            word_count: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Heading {
     pub level: u8,

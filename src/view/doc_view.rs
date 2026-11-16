@@ -1,7 +1,7 @@
 //! Область документа: скролл + центрированная колонка типографики.
 //! Этап 0 — наивный рендер всех блоков; этап 1 заменит на виртуализацию.
 
-use eframe::egui::{self, pos2, vec2, Color32, Id, Rect, ScrollArea, Sense, Stroke, Ui, Vec2};
+use eframe::egui::{self, pos2, Color32, Id, Rect, ScrollArea, Sense, Stroke, Ui, Vec2};
 
 use crate::md::blocks::Doc;
 
@@ -30,7 +30,8 @@ pub fn show(ui: &mut Ui, doc: &Doc, env: &Env) -> Vec<DocEvent> {
     let out = ScrollArea::vertical()
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, viewport| {
-            // Просьба «наверх» от круглой кнопки: скроллируем к началу контента.
+            // Просьба «наверх»: скроллируем к курсору = началу контента
+            // (scroll_to_rect ждёт экранные координаты, поэтому не подходит).
             if ui.ctx().data_mut(|d| {
                 let v = d.get_temp::<bool>(scroll_top_id).unwrap_or(false);
                 if v {
@@ -38,10 +39,7 @@ pub fn show(ui: &mut Ui, doc: &Doc, env: &Env) -> Vec<DocEvent> {
                 }
                 v
             }) {
-                ui.scroll_to_rect(
-                    Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 10.0)),
-                    Some(egui::Align::Min),
-                );
+                ui.scroll_to_cursor(Some(egui::Align::Min));
             }
 
             ui.add_space(20.0);
@@ -86,11 +84,17 @@ fn show_fab(ui: &mut Ui, progress: f32, scroll_top_id: Id) {
     let center = rect.center();
     let radius = FAB_SIZE * 0.5;
 
-    // Тёмный фон, при наведении — чуть светлее.
-    let bg = if resp.hovered() {
-        lighten(FAB_BG, 0.35)
+    // Тёмный фон, при наведении — чуть светлее (шеврон остаётся читаемым).
+    let hovered = resp.hovered();
+    let bg = if hovered {
+        lighten(FAB_BG, 0.15)
     } else {
         FAB_BG
+    };
+    let chevron = if hovered {
+        lighten(FAB_CHEVRON, 0.35)
+    } else {
+        FAB_CHEVRON
     };
     painter.circle(center, radius, bg, Stroke::NONE);
 
@@ -113,17 +117,17 @@ fn show_fab(ui: &mut Ui, progress: f32, scroll_top_id: Id) {
             pos2(center.x - s, center.y + s * 0.4),
             pos2(center.x, center.y - s * 0.6),
         ],
-        Stroke::new(2.5, FAB_CHEVRON),
+        Stroke::new(2.5, chevron),
     );
     painter.line_segment(
         [
             pos2(center.x, center.y - s * 0.6),
             pos2(center.x + s, center.y + s * 0.4),
         ],
-        Stroke::new(2.5, FAB_CHEVRON),
+        Stroke::new(2.5, chevron),
     );
 
-    if resp.hovered() {
+    if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if resp.clicked() {

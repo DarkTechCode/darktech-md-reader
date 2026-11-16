@@ -83,6 +83,9 @@ impl App {
         fonts::install(&cc.egui_ctx);
         let lang = system_lang();
         let dark = true;
+        // Фиксируем тёмную тему egui: без этого при системной светлой теме
+        // наш стиль попадает в Dark, а рендерится дефолтный Light.
+        cc.egui_ctx.set_theme(egui::ThemePreference::Dark);
         themes::apply(
             &cc.egui_ctx,
             if dark { &themes::DARK } else { &themes::LIGHT },
@@ -240,6 +243,13 @@ fn pick_md_file() -> Option<PathBuf> {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Стиль темы может сбрасываться (смена темы системой/eframe) —
+        // тогда egui вернёт свои дефолты (серый скроллбар и пр.). Возвращаем наш.
+        if ui.visuals().panel_fill != self.pal().bg {
+            themes::apply(&ctx, self.pal(), self.dark);
+        }
+
         self.handle_input(&ctx);
 
         egui::Panel::top("tab_strip")
@@ -311,7 +321,13 @@ fn tab_strip(ui: &mut Ui, app: &mut App) {
             let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
             let painter = ui.painter();
             if is_active {
-                painter.rect_filled(rect, egui::CornerRadius::same(0), pal.bg);
+                // Активная вкладка тоже реагирует на наведение — чуть светлее фон.
+                let fill = if resp.hovered() {
+                    themes::lighten(pal.bg, 0.10)
+                } else {
+                    pal.bg
+                };
+                painter.rect_filled(rect, egui::CornerRadius::same(0), fill);
             } else if resp.hovered() {
                 painter.rect_filled(
                     rect,

@@ -568,7 +568,7 @@ fn show_code(ui: &mut Ui, idx: usize, lang: &Option<String>, code: &str, env: &E
             btn_rect,
             egui::CornerRadius::same(0),
             if hovered {
-                lighten(env.pal.code_bg, 0.5)
+                lighten(env.pal.code_bg, 0.18)
             } else {
                 Color32::TRANSPARENT
             },

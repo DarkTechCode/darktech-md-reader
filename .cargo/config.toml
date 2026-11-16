@@ -1,0 +1,6 @@
+[build]
+target = "x86_64-pc-windows-msvc"
+
+[rust]
+# Статический CRT — exe не требует vcredist
+rustflags = ["-C", "target-feature=+crt-static"]

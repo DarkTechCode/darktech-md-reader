@@ -1,0 +1,494 @@
+//! pulldown-cmark → плоский вектор блоков.
+//! Контейнеры (цитаты, списки) «разглаживаются»: вложенное содержимое становится
+//! отдельными блоками с метаданными глубины/маркера.
+
+use std::ops::Range;
+use std::sync::Arc;
+
+use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+
+use super::blocks::{Align, Alert, BlockKind, Doc, Fmt, Heading, ListMarker, Span, TableRow};
+
+/// Модификатор inline-контекста (стек: жирный внутри ссылки и т.п.).
+#[derive(Clone, Debug)]
+enum Inline {
+    Emph,
+    Strong,
+    Strike,
+    Link(String),
+}
+
+#[derive(Default)]
+struct ListCtx {
+    ordered: Option<u64>,
+    /// Номер текущего пункта нумерованного списка.
+    number: u64,
+    next_number: u64,
+    /// Уже был блок в текущем пункте (для `cont`).
+    item_has_block: bool,
+    /// Чекбокс текущего пункта.
+    item_task: Option<bool>,
+    /// Список с пустыми строками между пунктами.
+    loose: bool,
+}
+
+struct TableCtx {
+    aligns: Vec<Align>,
+    rows: Vec<TableRow>,
+    row: Vec<Vec<Span>>,
+    in_head: bool,
+}
+
+struct State {
+    blocks: Vec<BlockKind>,
+    headings: Vec<Heading>,
+    /// Накопленные inline-спаны текущего блока.
+    spans: Vec<Span>,
+    /// Стек inline-модификаторов.
+    inline: Vec<Inline>,
+    lists: Vec<ListCtx>,
+    quote_depth: u8,
+    alert: Option<Alert>,
+    /// Уровень заголовка, который сейчас собираем.
+    heading: Option<u8>,
+    /// Собираемый блок кода: (язык, текст).
+    code: Option<(Option<String>, String)>,
+    /// Собираемый блок HTML.
+    html: String,
+    in_html_block: bool,
+    table: Option<TableCtx>,
+    /// Кандидат на «картинку-абзац»: (url, alt). Действует, пока абзац
+    /// не получил другого контента.
+    para_img: Option<(String, String)>,
+    /// Внутри alt такой картинки.
+    in_img_alt: bool,
+    para_has_other: bool,
+}
+
+pub fn parse(source: Arc<str>) -> Doc {
+    let mut opts = Options::empty();
+    opts.insert(
+        Options::ENABLE_TABLES
+            | Options::ENABLE_STRIKETHROUGH
+            | Options::ENABLE_TASKLISTS
+            | Options::ENABLE_GFM,
+    );
+
+    let mut st = State {
+        blocks: Vec::new(),
+        headings: Vec::new(),
+        spans: Vec::new(),
+        inline: Vec::new(),
+        lists: Vec::new(),
+        quote_depth: 0,
+        alert: None,
+        heading: None,
+        code: None,
+        html: String::new(),
+        in_html_block: false,
+        table: None,
+        para_img: None,
+        in_img_alt: false,
+        para_has_other: false,
+    };
+
+    for (event, range) in Parser::new_ext(&source, opts).into_offset_iter() {
+        handle_event(&mut st, event, range);
+    }
+
+    Doc {
+        word_count: source.split_whitespace().count(),
+        source,
+        blocks: st.blocks,
+        headings: st.headings,
+    }
+}
+
+fn handle_event(st: &mut State, event: Event, range: Range<usize>) {
+    match event {
+        Event::Start(tag) => start_tag(st, tag),
+        Event::End(end) => end_tag(st, end),
+        Event::Text(text) => push_text(st, text.into_string(), Some(range)),
+        Event::Code(text) => push_code(st, text.into_string(), Some(range)),
+        Event::Html(html) => {
+            if st.in_html_block {
+                st.html.push_str(&html);
+            } else {
+                push_inline_html(st, &html);
+            }
+        }
+        Event::InlineHtml(html) => push_inline_html(st, &html),
+        Event::SoftBreak => push_synthetic(st, " ", Some(range)),
+        Event::HardBreak => push_synthetic(st, "\n", Some(range)),
+        Event::Rule => {
+            flush_before_block(st);
+            st.blocks.push(BlockKind::Rule);
+        }
+        Event::TaskListMarker(checked) => {
+            if let Some(list) = st.lists.last_mut() {
+                list.item_task = Some(checked);
+            }
+        }
+        // Сноски не поддерживаем: ходить по ним не нужно, ссылку опускаем.
+        Event::FootnoteReference(_) => {}
+        // Опции выключены, эти события не приходят.
+        Event::InlineMath(_) | Event::DisplayMath(_) => {}
+    }
+}
+
+/// Вложенный блок (список/цитата/код внутри пункта) прерывает накопление:
+/// сначала фиксируем текущий блок, потом начинаем новый.
+fn flush_before_block(st: &mut State) {
+    if !st.spans.is_empty() {
+        flush_spans(st);
+    }
+}
+
+fn start_tag(st: &mut State, tag: Tag) {
+    match tag {
+        Tag::Paragraph => {
+            // Абзац внутри пункта списка помечает список как «рыхлый».
+            if let Some(list) = st.lists.last_mut() {
+                list.loose = true;
+            }
+            st.para_img = None;
+            st.para_has_other = false;
+        }
+        Tag::Heading { level, .. } => {
+            flush_before_block(st);
+            st.heading = Some(level as u8);
+            st.spans.clear();
+        }
+        Tag::BlockQuote(kind) => {
+            flush_before_block(st);
+            st.quote_depth += 1;
+            if st.quote_depth == 1 {
+                st.alert = kind.map(|k| match k {
+                    BlockQuoteKind::Note => Alert::Note,
+                    BlockQuoteKind::Tip => Alert::Tip,
+                    BlockQuoteKind::Important => Alert::Important,
+                    BlockQuoteKind::Warning => Alert::Warning,
+                    BlockQuoteKind::Caution => Alert::Caution,
+                });
+            }
+        }
+        Tag::CodeBlock(kind) => {
+            flush_before_block(st);
+            let lang = match kind {
+                CodeBlockKind::Indented => None,
+                CodeBlockKind::Fenced(info) => info
+                    .trim()
+                    .split_whitespace()
+                    .next()
+                    .map(|s| s.to_ascii_lowercase()),
+            };
+            st.code = Some((lang, String::new()));
+        }
+        Tag::HtmlBlock => {
+            flush_before_block(st);
+            st.in_html_block = true;
+        }
+        Tag::List(start) => {
+            flush_before_block(st);
+            st.lists.push(ListCtx {
+                ordered: start,
+                next_number: start.unwrap_or(1),
+                ..Default::default()
+            });
+        }
+        Tag::Item => {
+            if let Some(list) = st.lists.last_mut() {
+                list.number = list.next_number;
+                if list.ordered.is_some() {
+                    list.next_number += 1;
+                }
+                list.item_has_block = false;
+                list.item_task = None;
+            }
+        }
+        Tag::Table(aligns) => {
+            flush_before_block(st);
+            st.table = Some(TableCtx {
+                aligns: aligns
+                    .into_iter()
+                    .map(|a| match a {
+                        pulldown_cmark::Alignment::None => Align::None,
+                        pulldown_cmark::Alignment::Left => Align::Left,
+                        pulldown_cmark::Alignment::Center => Align::Center,
+                        pulldown_cmark::Alignment::Right => Align::Right,
+                    })
+                    .collect(),
+                rows: Vec::new(),
+                row: Vec::new(),
+                in_head: false,
+            });
+        }
+        Tag::TableHead => {
+            if let Some(t) = st.table.as_mut() {
+                t.in_head = true;
+            }
+        }
+        Tag::TableRow | Tag::TableCell => {}
+        Tag::Emphasis => st.inline.push(Inline::Emph),
+        Tag::Strong => st.inline.push(Inline::Strong),
+        Tag::Strikethrough => st.inline.push(Inline::Strike),
+        Tag::Link { dest_url, .. } => st.inline.push(Inline::Link(dest_url.into_string())),
+        Tag::Image { dest_url, .. } => {
+            // Кандидат на «картинку-абзац»: картинка — первое содержимое абзаца.
+            let standalone = st.spans.is_empty()
+                && !st.para_has_other
+                && st.para_img.is_none()
+                && st.heading.is_none()
+                && st.table.is_none()
+                && st.code.is_none();
+            if standalone {
+                st.para_img = Some((dest_url.into_string(), String::new()));
+                st.in_img_alt = true;
+            }
+        }
+        // Над/подстрочные знаки рендерим как обычный текст.
+        Tag::Superscript | Tag::Subscript => {}
+        // Опции выключены (definition list, metadata), эти события не приходят.
+        Tag::DefinitionList
+        | Tag::DefinitionListTitle
+        | Tag::DefinitionListDefinition
+        | Tag::MetadataBlock(_)
+        | Tag::FootnoteDefinition(_) => {}
+    }
+}
+
+fn end_tag(st: &mut State, end: TagEnd) {
+    match end {
+        TagEnd::Paragraph => flush_para(st),
+        TagEnd::Heading(_) => flush_heading(st),
+        TagEnd::BlockQuote(_) => {
+            st.quote_depth = st.quote_depth.saturating_sub(1);
+            if st.quote_depth == 0 {
+                st.alert = None;
+            }
+        }
+        TagEnd::CodeBlock => {
+            if let Some((lang, code)) = st.code.take() {
+                st.blocks.push(BlockKind::Code { lang, code });
+            }
+        }
+        TagEnd::HtmlBlock => {
+            st.in_html_block = false;
+            let code = std::mem::take(&mut st.html);
+            if !code.trim().is_empty() {
+                st.blocks.push(BlockKind::Code {
+                    lang: Some("html".into()),
+                    code,
+                });
+            }
+        }
+        TagEnd::List(_) => {
+            st.lists.pop();
+        }
+        TagEnd::Item => flush_spans(st),
+        TagEnd::Table => {
+            if let Some(t) = st.table.take() {
+                if !t.rows.is_empty() {
+                    st.blocks.push(BlockKind::Table {
+                        aligns: t.aligns,
+                        rows: t.rows,
+                    });
+                }
+            }
+        }
+        TagEnd::TableHead => {
+            if let Some(t) = st.table.as_mut() {
+                t.in_head = false;
+                let row = std::mem::take(&mut t.row);
+                t.rows.push(TableRow { cells: row });
+            }
+        }
+        TagEnd::TableRow => {
+            if let Some(t) = st.table.as_mut() {
+                let row = std::mem::take(&mut t.row);
+                t.rows.push(TableRow { cells: row });
+            }
+        }
+        TagEnd::TableCell => {
+            if let Some(t) = st.table.as_mut() {
+                let cell = std::mem::take(&mut st.spans);
+                t.row.push(cell);
+            }
+        }
+        TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
+            st.inline.pop();
+        }
+        TagEnd::Link => {
+            st.inline.pop();
+        }
+        TagEnd::Image => st.in_img_alt = false,
+        TagEnd::Superscript | TagEnd::Subscript => {}
+        TagEnd::DefinitionList
+        | TagEnd::DefinitionListTitle
+        | TagEnd::DefinitionListDefinition
+        | TagEnd::MetadataBlock(_)
+        | TagEnd::FootnoteDefinition => {}
+    }
+}
+
+/// Картинка-абзац: абзац, состоящий из одного изображения.
+fn flush_para(st: &mut State) {
+    st.in_img_alt = false;
+    if let Some((url, alt)) = st.para_img.take() {
+        if !st.para_has_other {
+            st.blocks.push(BlockKind::Image { url, alt });
+            return;
+        }
+    }
+    flush_spans(st);
+}
+
+fn flush_heading(st: &mut State) {
+    let level = st.heading.take().unwrap_or(6);
+    let spans = std::mem::take(&mut st.spans);
+    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+    let heading_idx = st.headings.len();
+    st.headings.push(Heading {
+        level,
+        text,
+        block_idx: st.blocks.len(),
+    });
+    st.blocks.push(BlockKind::Heading {
+        level,
+        spans,
+        heading_idx,
+    });
+}
+
+/// Превращает накопленные спаны в блок контента (абзац/цитату/пункт списка).
+fn flush_spans(st: &mut State) {
+    if st.spans.is_empty() {
+        return;
+    }
+    let spans = std::mem::take(&mut st.spans);
+    let quote_depth = st.quote_depth;
+
+    if let Some(list) = st.lists.last_mut() {
+        let cont = list.item_has_block;
+        let task = if cont { None } else { list.item_task.take() };
+        let marker = match list.ordered {
+            Some(_) => ListMarker::Ordered(list.number),
+            None => ListMarker::Bullet,
+        };
+        let loose = list.loose;
+        list.item_has_block = true;
+        let indent = st.lists.len() as u8;
+        st.blocks.push(BlockKind::ListItem {
+            indent,
+            marker,
+            task,
+            cont,
+            loose,
+            quote_depth,
+            spans,
+        });
+        return;
+    }
+
+    if quote_depth > 0 {
+        let alert = if quote_depth == 1 { st.alert } else { None };
+        st.blocks.push(BlockKind::Quote {
+            depth: quote_depth,
+            alert,
+            spans,
+        });
+        return;
+    }
+
+    st.blocks.push(BlockKind::Paragraph { spans });
+}
+
+/// Текст события: в блоке кода копится код, в alt картинки — alt, иначе — спан.
+fn push_text(st: &mut State, text: String, src: Option<Range<usize>>) {
+    if let Some((_, code)) = st.code.as_mut() {
+        code.push_str(&text);
+        return;
+    }
+    if st.in_img_alt {
+        if let Some((_, alt)) = st.para_img.as_mut() {
+            alt.push_str(&text);
+            return;
+        }
+    }
+    st.para_has_other = true;
+    st.spans.push(Span {
+        text,
+        src,
+        fmt: current_fmt(st),
+        link: current_link(st),
+    });
+}
+
+/// Инлайн-код `…`.
+fn push_code(st: &mut State, text: String, src: Option<Range<usize>>) {
+    st.para_has_other = true;
+    let mut fmt = current_fmt(st);
+    fmt.code = true;
+    st.spans.push(Span {
+        text,
+        src,
+        fmt,
+        link: current_link(st),
+    });
+}
+
+/// Синтезированный спан (перевод строки и т.п.).
+fn push_synthetic(st: &mut State, text: &str, src: Option<Range<usize>>) {
+    if st.in_img_alt {
+        if let Some((_, alt)) = st.para_img.as_mut() {
+            alt.push(' ');
+            return;
+        }
+    }
+    if st.code.is_some() {
+        return;
+    }
+    st.para_has_other = true;
+    st.spans.push(Span {
+        text: text.into(),
+        src,
+        fmt: current_fmt(st),
+        link: current_link(st),
+    });
+}
+
+fn push_inline_html(st: &mut State, html: &str) {
+    st.para_has_other = true;
+    st.spans.push(Span {
+        text: html.to_string(),
+        src: None,
+        fmt: Fmt {
+            html: true,
+            ..current_fmt(st)
+        },
+        link: None,
+    });
+}
+
+fn current_fmt(st: &State) -> Fmt {
+    let mut fmt = Fmt::default();
+    for item in &st.inline {
+        match item {
+            Inline::Emph => fmt.italic = true,
+            Inline::Strong => fmt.bold = true,
+            Inline::Strike => fmt.strike = true,
+            Inline::Link(_) => {}
+        }
+    }
+    fmt
+}
+
+fn current_link(st: &State) -> Option<Box<str>> {
+    st.inline
+        .iter()
+        .rev()
+        .find_map(|i| match i {
+            Inline::Link(url) => Some(url.as_str().into()),
+            _ => None,
+        })
+}

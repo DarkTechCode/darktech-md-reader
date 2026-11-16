@@ -1,3 +1,6 @@
+// В release — GUI-приложение без окна консоли (в debug консоль оставляем для логов).
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 
 fn main() -> eframe::Result {

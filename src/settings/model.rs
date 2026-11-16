@@ -90,6 +90,9 @@ pub struct SettingsData {
     pub fit_width: bool,
     /// Выравнивать содержимое ячеек таблиц по верхнему краю (иначе по центру).
     pub table_top: bool,
+    /// Горизонтальный скролл в широких таблицах (выкл — сжатие в ширину
+    /// колонки текста с переносом ячеек по словам).
+    pub table_scroll: bool,
     /// Нумерация строк в блоках кода.
     pub code_line_numbers: bool,
     /// Подсветка синтаксиса в блоках кода.
@@ -121,6 +124,7 @@ impl Default for SettingsData {
             ui_font_size: UI_FONT_DEFAULT,
             fit_width: false,
             table_top: false,
+            table_scroll: true,
             code_line_numbers: false,
             code_highlight: true,
             toc_mode: PanelMode::Auto,
@@ -204,6 +208,7 @@ mod tests {
         assert_eq!(d.ui_font_size, 14);
         assert!(!d.fit_width);
         assert!(!d.table_top);
+        assert!(d.table_scroll);
         assert!(!d.code_line_numbers);
         assert!(d.code_highlight);
         assert_eq!(d.toc_mode, PanelMode::Auto);
@@ -260,6 +265,7 @@ mod tests {
         assert!(js.contains("\"uiFontSize\":14"));
         assert!(js.contains("\"fitWidth\":false"));
         assert!(js.contains("\"tableTop\":false"));
+        assert!(js.contains("\"tableScroll\":true"));
         assert!(js.contains("\"codeLineNumbers\":false"));
         assert!(js.contains("\"codeHighlight\":true"));
         assert!(js.contains("\"tocMode\":\"auto\""));

@@ -1,5 +1,6 @@
 //! Таблица: колонки по измеренной раскладке, строки рисуются/измеряются
-//! только видимые (высоты копятся в TablePrep).
+//! только видимые (высоты копятся в TablePrep). Ячейки кладутся через
+//! place_text: работают ссылки (hover/клик) и собственное выделение.
 
 use eframe::egui::{pos2, vec2, CornerRadius, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder};
 
@@ -7,18 +8,21 @@ use crate::layout::measure::TablePrep;
 use crate::md::blocks::{Align as MdAlign, TableRow};
 
 use super::super::doc_view::DocEvent;
+use super::super::selection::SelFrame;
 use super::super::Env;
+use super::text::{place_text, Place};
 
 pub fn render_table(
     ui: &mut Ui,
     rect: Rect,
     vis: Rect,
-    // id скролла уникален через id блока; idx оставлен для единообразия диспетчера.
-    _idx: usize,
+    // id скролла уникален через id блока; индекс блока — координата выделения.
+    idx: usize,
     aligns: &[MdAlign],
     rows: &[TableRow],
     prep: &mut TablePrep,
     env: &Env,
+    frame: &mut SelFrame,
 ) -> (Vec<DocEvent>, Option<f32>) {
     let pad_h = prep.pad_h;
     let pad_v = prep.pad_v;
@@ -26,19 +30,20 @@ pub fn render_table(
     let top = rect.min.y + prep.gap_top;
     let content_h = (rect.height() - prep.gap_top - prep.gap_bottom).max(0.0);
     let area = Rect::from_min_size(pos2(rect.min.x, top), vec2(rect.width(), content_h));
-    let new_height = ui
+    let (out, new_height) = ui
         .scope_builder(UiBuilder::new().max_rect(area), |ui| {
-            scroll_rows(ui, vis, aligns, rows, prep, pad_h, pad_v, content_h, env)
+            scroll_rows(ui, vis, idx, aligns, rows, prep, pad_h, pad_v, content_h, env, frame)
         })
         .inner;
 
-    (Vec::new(), new_height)
+    (out, new_height)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn scroll_rows(
     ui: &mut Ui,
     vis: Rect,
+    idx: usize,
     aligns: &[MdAlign],
     rows: &[TableRow],
     prep: &mut TablePrep,
@@ -46,8 +51,11 @@ fn scroll_rows(
     pad_v: f32,
     content_h: f32,
     env: &Env,
-) -> Option<f32> {
-    ScrollArea::horizontal()
+    frame: &mut SelFrame,
+) -> (Vec<DocEvent>, Option<f32>) {
+    let ncols = aligns.len().max(1);
+    let mut events = Vec::new();
+    let new_height = ScrollArea::horizontal()
         .id_salt("table_rows")
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -113,7 +121,25 @@ fn scroll_rows(
                         row_top + (rh - g.size().y) / 2.0
                     };
                     let cell_rect = Rect::from_min_size(pos2(tx, ty), g.size());
-                    ui.put(cell_rect, eframe::egui::Label::new(g.clone()));
+                    let cell = row.cells.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
+                    let mut spec = prep.cell.clone();
+                    spec.bold = ri == 0;
+                    spec.wrap = cw - pad_h * 2.0;
+                    events.extend(place_text(
+                        ui,
+                        env.pal,
+                        Place {
+                            galley: g,
+                            rect: cell_rect,
+                            spans: cell,
+                            spec: &spec,
+                            block: idx,
+                            sub: ri * ncols + ci,
+                            base_ch: 0,
+                            total_ch: cell.iter().map(|s| s.text.chars().count()).sum(),
+                        },
+                        frame,
+                    ));
                     x += cw;
                 }
                 painter.line_segment(
@@ -132,5 +158,6 @@ fn scroll_rows(
                 None
             }
         })
-        .inner
+        .inner;
+    (events, new_height)
 }

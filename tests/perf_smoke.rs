@@ -134,6 +134,7 @@ fn layout_state_visible_range_and_anchor() {
         dark: true,
         lang: darktech_md::i18n::Lang::Ru,
         code_nums: false,
+        table_scroll: true,
     };
     let mut layout = LayoutState::default();
     layout.ensure(&doc, key);

@@ -18,7 +18,9 @@ use crate::layout::measure::{
 };
 
 use super::super::doc_view::DocEvent;
+use super::super::selection::SelFrame;
 use super::super::Env;
+use super::text::{place_text, Place};
 
 /// Сколько секунд показывать «Скопировано!» после клика.
 const COPIED_SECS: f64 = 3.0;
@@ -32,6 +34,7 @@ pub fn render_code(
     code: &str,
     prep: &CodePrep,
     env: &Env,
+    frame: &mut SelFrame,
 ) -> (Vec<DocEvent>, Option<f32>) {
     let em = prep.em;
     let pad = prep.pad;
@@ -65,6 +68,7 @@ pub fn render_code(
         pos2(card.max.x, card.max.y - CODE_FOOTER_H - prep.bar_space),
     );
     let lines_area_h = body.height() - pad * 2.0;
+    let mut evs = Vec::new();
     ui.scope_builder(UiBuilder::new().max_rect(body), |ui| {
         ScrollArea::horizontal()
             .id_salt(("code_h", idx))
@@ -115,6 +119,16 @@ pub fn render_code(
 
                 if !slice.is_empty() {
                     let text_x = crect.min.x + pad + prep.gutter_w;
+                    // Спецификация plain-набора (для place_text; ссылок в коде нет).
+                    let spec = JobSpec {
+                        size: prep.em * 0.84,
+                        family: FontFamily::Name(crate::fonts::MONO.into()),
+                        color: env.pal.fg,
+                        bold: false,
+                        wrap: f32::INFINITY,
+                        line_height: prep.line_h,
+                        letter_spacing: env.typo.letter_spacing,
+                    };
                     // Подсветка синтаксиса (кэш по видимому срезу) или plain.
                     let job = if env.code_highlight {
                         highlighted_job(ui, slice, lang, idx, prep, env)
@@ -122,13 +136,27 @@ pub fn render_code(
                     } else {
                         plain_code_job(slice, prep, env)
                     };
-                    // Готовый galley — без переразметки Label'ом (левый край).
+                    // Готовый galley: место кладём сами (левый край + выделение).
                     let g = ui.painter().layout_job(job);
                     let label_rect = Rect::from_min_size(
                         pos2(text_x, text_top + a as f32 * prep.line_h),
                         g.size(),
                     );
-                    ui.put(label_rect, egui::Label::new(g));
+                    evs.extend(place_text(
+                        ui,
+                        env.pal,
+                        Place {
+                            galley: &g,
+                            rect: label_rect,
+                            spans: &[],
+                            spec: &spec,
+                            block: idx,
+                            sub: 0,
+                            base_ch: prep.line_char_starts[a] as usize,
+                            total_ch: prep.total_ch,
+                        },
+                        frame,
+                    ));
                 }
             });
     });
@@ -140,7 +168,7 @@ pub fn render_code(
     );
     draw_copy_button(ui, frect, ("code_copy_b", idx), code, em, pad, env);
 
-    (Vec::new(), None)
+    (evs, None)
 }
 
 /// LayoutJob видимого среза кода одним куском (моно, без переноса).

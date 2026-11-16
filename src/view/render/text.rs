@@ -1,4 +1,5 @@
-//! Текстовые блоки: декорации из раскладки + выделяемый Label со ссылками.
+//! Текстовые блоки: декорации из раскладки + текст с собственным выделением
+//! (подсветка красится в галлей за глифами) и ссылками (hover/клик/подсказка).
 
 use std::sync::Arc;
 
@@ -6,23 +7,44 @@ use eframe::egui::{
     self as egui, pos2, vec2, Color32, CornerRadius, FontFamily, FontId, Rect, Stroke, StrokeKind,
     Ui,
 };
-use eframe::egui::text::{ByteIndex, CCursor, Galley, LayoutJob, LayoutSection, TextFormat};
+use eframe::egui::text::{ByteIndex, CCursor, CCursorRange, Galley, LayoutJob, LayoutSection, TextFormat};
 
-use crate::layout::measure::{JobSpec, Marker, TextPrep};
+use crate::layout::measure::{char_starts, JobSpec, Marker, TextPrep};
 use crate::md::blocks::Span;
 
 use super::misc::draw_checkbox;
 use super::super::doc_view::DocEvent;
+use super::super::selection::{Region, SelFrame};
 use super::super::themes::Palette;
 use super::super::Env;
+
+/// Параметры place_text: что кладём и где, с координатами выделения.
+pub struct Place<'a> {
+    /// Готовый галлей (без подсветки ссылки — при hover переберётся по spec).
+    pub galley: &'a Arc<Galley>,
+    /// Экранный прямоугольник галлея.
+    pub rect: Rect,
+    /// Спаны текста (ссылки, выделение слов); пусто для кода.
+    pub spans: &'a [Span],
+    /// Спецификация job (пересборка с подсветкой ссылки).
+    pub spec: &'a JobSpec,
+    /// Координаты выделения: блок / под-область / база видимого среза.
+    pub block: usize,
+    pub sub: usize,
+    pub base_ch: usize,
+    /// Полная длина текста под-области, символов.
+    pub total_ch: usize,
+}
 
 /// Рисует подготовленный текстовый блок: фон/полосу цитаты, маркер, текст.
 pub fn render_text(
     ui: &mut Ui,
     rect: Rect,
+    block: usize,
     spans: &[Span],
     prep: &TextPrep,
     env: &Env,
+    frame: &mut SelFrame,
 ) -> Vec<DocEvent> {
     let painter = ui.painter().clone();
     let o = rect.min;
@@ -61,69 +83,102 @@ pub fn render_text(
     }
 
     let label_rect = Rect::from_min_size(o + prep.text_pos, prep.galley.size());
-    put_text(
+    place_text(
         ui,
-        label_rect,
-        &prep.galley,
-        spans,
-        &prep.spec,
         env.pal,
-        &prep.char_starts,
+        Place {
+            galley: &prep.galley,
+            rect: label_rect,
+            spans,
+            spec: &prep.spec,
+            block,
+            sub: 0,
+            base_ch: 0,
+            total_ch: prep.total_ch,
+        },
+        frame,
     )
 }
 
-/// Кладёт выделяемый Label с поддержкой ссылок: hover (цвет+курсор+подсказка)
-/// и клик. Возвращает события открытых ссылок.
-fn put_text(
-    ui: &mut Ui,
-    label_rect: Rect,
-    galley: &Arc<Galley>,
-    spans: &[Span],
-    spec: &JobSpec,
-    pal: &Palette,
-    job_text_char_starts: &[usize],
-) -> Vec<DocEvent> {
-    let has_links = spans.iter().any(|s| s.link.is_some());
-    let mut hover: Option<(String, Rect)> = None;
+/// Кладёт текст: регистрирует область выделения, красит подсветку прямо в
+/// галлей (за глифами), обрабатывает ссылки (hover, «чистый» клик) — общий
+/// путь для абзацев/заголовков/цитат/списков, ячеек таблиц и кода.
+pub fn place_text(ui: &mut Ui, pal: &Palette, p: Place<'_>, f: &mut SelFrame) -> Vec<DocEvent> {
+    // Область видимого текста: нужен трекингу выделения (драг под курсором —
+    // сразу, чтобы подсветка не отставала на кадр).
+    let region = Region {
+        block: p.block,
+        sub: p.sub,
+        galley: p.galley.clone(),
+        rect: p.rect,
+        base_ch: p.base_ch,
+        total_ch: p.total_ch,
+    };
+    f.regions.push(region.clone());
+    if f.sel.is_dragging()
+        && let Some(pos) = f.pointer
+        && p.rect.contains(pos)
+    {
+        let raw = region.hit(pos);
+        let unit = region.around(raw.ch, f.sel.granularity());
+        f.sel.drag_focus(raw, unit);
+    }
 
-    if has_links {
-        if let Some(p) = ui.input(|i| i.pointer.hover_pos()) {
-            // Прямоугольник каждого ссылочного спана — объединение курсоров начала/конца.
-            for (i, span) in spans.iter().enumerate() {
-                let Some(url) = span.link.as_deref() else { continue };
-                let cs = job_text_char_starts[i];
-                let ce = cs + span.text.chars().count();
-                let r1 = galley.pos_from_cursor(CCursor::new(cs));
-                let r2 = galley.pos_from_cursor(CCursor::new(ce));
-                let r = r1.union(r2).translate(label_rect.min.to_vec2());
-                if r.contains(p) {
-                    hover = Some((url.to_string(), r));
-                    break;
-                }
+    // Ссылка под курсором: прямоугольник каждого ссылочного спана —
+    // объединение курсоров начала/конца.
+    let mut hover: Option<(String, Rect)> = None;
+    if p.spans.iter().any(|s| s.link.is_some())
+        && let Some(pos) = f.pointer
+    {
+        let starts = char_starts(p.spans);
+        for (i, span) in p.spans.iter().enumerate() {
+            let Some(url) = span.link.as_deref() else { continue };
+            let cs = starts[i];
+            let ce = cs + span.text.chars().count();
+            let r = p
+                .galley
+                .pos_from_cursor(CCursor::new(cs))
+                .union(p.galley.pos_from_cursor(CCursor::new(ce)))
+                .translate(p.rect.min.to_vec2());
+            if r.contains(pos) {
+                hover = Some((url.to_string(), r));
+                break;
             }
         }
     }
 
+    // Галлей кадра: с подсветкой ссылки под курсором (та же раскладка) —
+    // и с подсветкой выделения, вклеенной за глифами.
+    let mut galley = match &hover {
+        Some((url, _)) => ui.painter().layout_job(p.spec.job(p.spans, pal, Some(url))),
+        None => p.galley.clone(),
+    };
+    if let Some(range) = f.sel.region_range(p.block, p.sub) {
+        let a = galley.clamp_cursor(&CCursor::new(range.start.saturating_sub(p.base_ch)));
+        let b = galley.clamp_cursor(&CCursor::new(range.end.saturating_sub(p.base_ch)));
+        if a.index < b.index {
+            egui::text_selection::visuals::paint_text_selection(
+                &mut galley,
+                ui.visuals(),
+                &CCursorRange::two(a, b),
+                None,
+            );
+        }
+    }
+    let painter = ui.painter().clone();
+    painter.galley(p.rect.min, galley, pal.fg);
+
     let mut events = Vec::new();
     if let Some((url, r)) = &hover {
-        // Пересобираем job с подсветкой ссылки и кладём ГОТОВЫЙ galley:
-        // Label::new(Arc<Galley>) рендерит его как есть (ui.put создал бы
-        // centered_and_justified-ско́п и перекла́дывал job — позиции разъехались
-        // бы с хит-тестом). Ширины не меняются — раскладка та же.
-        let g = ui.painter().layout_job(spec.job(spans, pal, Some(url)));
-        ui.put(label_rect, egui::Label::new(g));
+        f.link_hover = true;
         draw_url_tooltip(ui, url);
-        // Курсор ставим ПОСЛЕ Label, иначе перебьётся курсором выделения текста.
+        // Курсор — после отрисовки текста, иначе перебьётся выделением.
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        if ui.input(|i| i.pointer.primary_clicked())
-            && r.contains(ui.input(|i| i.pointer.hover_pos()).unwrap())
-        {
+        // Ссылка открывается отпусканием без движения (драг выделяет текст).
+        let released = ui.input(|i| i.pointer.primary_released());
+        if released && f.pointer.is_some_and(|pos| r.contains(pos)) && f.sel.link_click_ok() {
             events.push(DocEvent::OpenLink(url.clone()));
         }
-    } else {
-        // Тот же galley, что прошёл хит-тест: выравнивание по левому краю
-        // (job.halign = LEFT по умолчанию), без justify.
-        ui.put(label_rect, egui::Label::new(galley.clone()));
     }
     events
 }

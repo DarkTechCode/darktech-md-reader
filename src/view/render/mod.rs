@@ -13,6 +13,7 @@ use crate::layout::measure::Prepared;
 use crate::md::blocks::BlockKind;
 
 use super::doc_view::DocEvent;
+use super::selection::SelFrame;
 use super::Env;
 
 /// Рисует блок `idx` в `rect` (экранные координаты). `vis` — видимый
@@ -29,27 +30,28 @@ pub fn render_block(
     block: &BlockKind,
     prep: &mut Prepared,
     env: &Env,
+    frame: &mut SelFrame,
 ) -> (Vec<DocEvent>, Option<f32>) {
     let id = ui.scope_id().with(("blk", tab_key, idx));
     ui.scope_builder(UiBuilder::new().max_rect(rect).scope_id(id), |ui| {
         match (block, prep) {
             (BlockKind::Heading { spans, .. }, Prepared::Text(p)) => {
-                (text::render_text(ui, rect, spans, p, env), None)
+                (text::render_text(ui, rect, idx, spans, p, env, frame), None)
             }
             (BlockKind::Paragraph { spans }, Prepared::Text(p)) => {
-                (text::render_text(ui, rect, spans, p, env), None)
+                (text::render_text(ui, rect, idx, spans, p, env, frame), None)
             }
             (BlockKind::Quote { spans, .. }, Prepared::Text(p)) => {
-                (text::render_text(ui, rect, spans, p, env), None)
+                (text::render_text(ui, rect, idx, spans, p, env, frame), None)
             }
             (BlockKind::ListItem { spans, .. }, Prepared::Text(p)) => {
-                (text::render_text(ui, rect, spans, p, env), None)
+                (text::render_text(ui, rect, idx, spans, p, env, frame), None)
             }
             (BlockKind::Code { lang, code }, Prepared::Code(p)) => {
-                code::render_code(ui, rect, vis, idx, lang, code, p, env)
+                code::render_code(ui, rect, vis, idx, lang, code, p, env, frame)
             }
             (BlockKind::Table { aligns, rows }, Prepared::Table(p)) => {
-                table::render_table(ui, rect, vis, idx, aligns, rows, p, env)
+                table::render_table(ui, rect, vis, idx, aligns, rows, p, env, frame)
             }
             (BlockKind::Rule, Prepared::Rule) => {
                 misc::render_rule(ui, rect, env);

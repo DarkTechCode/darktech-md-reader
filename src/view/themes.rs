@@ -158,7 +158,9 @@ fn visuals(pal: &Palette, dark: bool, text_options: TextOptions) -> Visuals {
     vis.extreme_bg_color = pal.code_bg;
     vis.code_bg_color = pal.inline_code_bg;
     vis.hyperlink_color = pal.link;
+    // Выделение: заливка + перекраска текста (paint_text_selection берёт оба).
     vis.selection.bg_fill = pal.selection;
+    vis.selection.stroke.color = pal.fg;
     vis.widgets.noninteractive.bg_fill = pal.bg;
     vis.widgets.noninteractive.fg_stroke.color = pal.fg;
     // Разделитель панелей (оглавление/миникарта): в нашем цвете границы.

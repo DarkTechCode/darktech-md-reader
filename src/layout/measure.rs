@@ -118,8 +118,8 @@ pub enum Prepared {
 pub struct TextPrep {
     pub galley: Arc<Galley>,
     pub spec: JobSpec,
-    /// Смещения (в символах) начала каждого спана в тексте job (хит-тест ссылок).
-    pub char_starts: Vec<usize>,
+    /// Полная длина текста блока в символах (выделение/копирование).
+    pub total_ch: usize,
     pub text_pos: Vec2,
     pub height: f32,
     /// Подпись GFM-alert цитаты.
@@ -150,6 +150,11 @@ pub struct CodePrep {
     pub line_h: f32,
     /// Байтовые смещения начал строк кода (для нарезки видимого окна).
     pub line_starts: Vec<u32>,
+    /// Символьные смещения начал строк (видимый срез + выделение: позиция
+    /// среза в полном тексте кода — в символах, как курсоры галлея).
+    pub line_char_starts: Vec<u32>,
+    /// Полная длина кода в символах (выделение/копирование блока).
+    pub total_ch: usize,
     /// Ширина гуттера с номерами строк (0 — нумерация выключена).
     pub gutter_w: f32,
     /// Полная ширина контента (гуттер + самая длинная строка + паддинги).
@@ -359,7 +364,7 @@ fn empty_text_prep(galley: Arc<Galley>, spec: JobSpec, spans: &[Span], text_pos:
     TextPrep {
         galley,
         spec,
-        char_starts: char_starts(spans),
+        total_ch: spans.iter().map(|s| s.text.chars().count()).sum(),
         text_pos,
         height,
         alert_label: None,
@@ -559,13 +564,19 @@ fn measure_code(
 
     // Строки и ширина: моно — ширина = число символов ×advance.
     let mut line_starts = Vec::new();
+    let mut line_char_starts = Vec::new();
     let mut max_chars = 0usize;
     let mut pos = 0usize;
+    let mut pos_ch = 0usize;
     for line in code.split('\n') {
         line_starts.push(pos as u32);
+        line_char_starts.push(pos_ch as u32);
+        let n = line.chars().count();
         pos += line.len() + 1;
-        max_chars = max_chars.max(line.chars().count());
+        pos_ch += n + 1;
+        max_chars = max_chars.max(n);
     }
+    let total_ch = code.chars().count();
     let char_w = mono_char_w(ui, code_em);
     // Гуттер номеров строк (если включён в настройках): ширина самого
     // широкого номера + зазор 20px до кода (номера прижаты влево).
@@ -594,6 +605,8 @@ fn measure_code(
         header_h: 32.0,
         line_h,
         line_starts,
+        line_char_starts,
+        total_ch,
         gutter_w,
         content_w,
         bar_space,
@@ -671,10 +684,11 @@ fn measure_table(
             *w += extra;
         }
     }
-    let (total_w, bar_space) = if env.fit_width && !cols.is_empty() {
-        // Режим «по ширине окна»: ровно на колонку, без горизонтального
-        // скролла — широкие колонки сжимаются пропорционально, содержимое
-        // переносится на новые строки в ячейках.
+    let (total_w, bar_space) = if (!env.table_scroll || env.fit_width) && !cols.is_empty() {
+        // Без скролла (режим «по ширине окна» или опция «Скролл в таблицах»
+        // выкл): ровно на колонку, без горизонтальной прокрутки — широкие
+        // колонки сжимаются пропорционально, содержимое переносится по
+        // словам на новые строки в ячейках.
         let sum = total.max(1.0);
         for w in &mut cols {
             *w = (*w * col_w / sum).max(24.0);

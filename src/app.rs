@@ -20,68 +20,13 @@ use crate::md::blocks::Doc;
 use crate::md::parser::{self, ParseMsg};
 use crate::settings::model::{self, PanelMode, SettingsData, Side, ThemeMode, WIDTH_PRESETS};
 use crate::settings::store;
+use crate::view::selection::{self, SelStats, SelectionState};
 use crate::view::{doc_view, minimap, nav, outline, settings_panel, themes, welcome, Env};
 use crate::fonts;
+use eframe::egui::Pos2;
 
 /// Задержка записи settings.json после последнего изменения (дебаунс слайдеров).
 const SAVE_DELAY: Duration = Duration::from_millis(400);
-
-/// Статистика выделения для статус-бара: (символы, слова, строки).
-pub type SelStats = (usize, usize, usize);
-
-/// egui отправляет TextSelectionSettled в конце прохода ПОСЛЕ кода
-/// приложения (это делает встроенный плагин выделения), поэтому единственный
-/// способ его увидеть — свой плагин, добавленный после встроенных.
-struct SelectionWatcher;
-
-impl eframe::egui::plugin::Plugin for SelectionWatcher {
-    fn debug_name(&self) -> &'static str {
-        "DarkTechMD::SelectionWatcher"
-    }
-
-    fn on_end_pass(&mut self, ui: &mut Ui) {
-        let ctx = ui.ctx().clone();
-        let settled: Option<String> = {
-            let mut found = None;
-            ctx.output(|o| {
-                for cmd in &o.commands {
-                    if let egui::OutputCommand::TextSelectionSettled(text) = cmd {
-                        found = Some(text.clone());
-                    }
-                }
-            });
-            found
-        };
-        if let Some(text) = settled {
-            let stats: Option<SelStats> = if text.is_empty() {
-                None
-            } else {
-                Some((
-                    text.chars().count(),
-                    text.split_whitespace().count(),
-                    text.matches('\n').count() + 1,
-                ))
-            };
-            ctx.data_mut(|d| d.insert_temp(egui::Id::unique("sel_stats"), stats));
-        } else {
-            // Живого текста выделения у egui публично нет (только по факту
-            // отпускания кнопки), поэтому чистим агрессивно: любое новое
-            // нажатие мыши или исчезновение выделения — статистика долой.
-            let pressed_now = ui.input(|i| i.pointer.any_pressed() && !i.modifiers.shift);
-            let has = ctx
-                .plugin::<eframe::egui::text_selection::LabelSelectionState>()
-                .lock()
-                .has_selection();
-            if !has || pressed_now {
-                ctx.data_mut(|d| {
-                    if d.get_temp::<Option<SelStats>>(egui::Id::unique("sel_stats")).is_some() {
-                        d.insert_temp(egui::Id::unique("sel_stats"), Option::<SelStats>::None);
-                    }
-                });
-            }
-        }
-    }
-}
 
 pub struct App {
     tabs: Vec<Tab>,
@@ -94,12 +39,27 @@ pub struct App {
     dark: bool,
     /// Панель настроек открыта.
     show_settings: bool,
+    /// Открытое контекст-меню документа (правый клик).
+    ctx_menu: Option<CtxMenu>,
     /// Счётчик id вкладок (стабильные id скроллов/блоков на переключение вкладок).
     next_tab_id: u64,
     /// Последний выставленный заголовок окна (чтобы не спамить командой).
     title_sent: String,
     /// Отложенная запись настроек (последнее изменение + SAVE_DELAY).
     save_after: Option<Instant>,
+}
+
+/// Открытое контекст-меню документа: позиция и ссылка под кликом.
+struct CtxMenu {
+    pos: Pos2,
+    link: Option<String>,
+}
+
+/// Действие контекст-меню (применяется после отрисовки).
+enum CtxAction {
+    CopyUrl(String),
+    Copy,
+    SelectAll,
 }
 
 /// Слова в минуту для оценки времени чтения (как у MarkMello).
@@ -114,6 +74,8 @@ pub struct Tab {
     pub layout: LayoutState,
     /// Состояние оглавления вкладки (высоты строк с переносами).
     pub toc: outline::TocState,
+    /// Собственное выделение текста (переживает виртуальный скролл).
+    pub selection: SelectionState,
 }
 
 pub enum TabState {
@@ -135,6 +97,7 @@ impl Tab {
             state: TabState::Welcome,
             layout: LayoutState::default(),
             toc: outline::TocState::default(),
+            selection: SelectionState::default(),
         }
     }
 
@@ -160,6 +123,7 @@ impl Tab {
             state,
             layout: LayoutState::default(),
             toc: outline::TocState::default(),
+            selection: SelectionState::default(),
         }
     }
 
@@ -221,8 +185,6 @@ impl App {
 
         // Прогрев подсветки синтаксиса в фоне (один раз, ~50 мс).
         crate::highlight::warm_up();
-        // Статистика выделения в статус-бар (см. SelectionWatcher).
-        cc.egui_ctx.add_plugin(SelectionWatcher);
 
         let mut next_id = 0;
         let mut paths = paths;
@@ -251,6 +213,7 @@ impl App {
             settings,
             dark,
             show_settings: false,
+            ctx_menu: None,
             next_tab_id: next_id + 1,
             title_sent: String::new(),
             save_after: None,
@@ -414,6 +377,96 @@ impl App {
         }
     }
 
+    /// Копирование выделения активной вкладки (plain text, из фона).
+    fn copy_selection(&mut self) {
+        if let Some(tab) = self.tabs.get(self.active)
+            && let Some(doc) = state_doc(&tab.state)
+            && let Some(text) = selection::copy_text(doc, &tab.selection)
+        {
+            crate::clipboard::copy_in_background(text);
+        }
+    }
+
+    /// Контекст-меню документа (правый клик): Копировать адрес (на ссылке) /
+    /// Копировать / Выделить всё. Плоское, поверх всего; закрывается кликом
+    /// мимо, Esc или действием.
+    fn show_context_menu(&mut self, ctx: &Context) {
+        let Some(menu) = self.ctx_menu.take() else { return };
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            return; // закрыть, не возвращая
+        }
+
+        let pal = self.pal();
+        let lang = self.lang();
+        let em = self.settings.ui_font_size as f32;
+        let has_selection = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|t| !t.selection.is_empty());
+
+        // Элементы: подпись, активность, действие.
+        let mut items: Vec<(&str, bool, CtxAction)> = Vec::new();
+        if let Some(url) = &menu.link {
+            items.push((t(lang, "cm_copy_url"), true, CtxAction::CopyUrl(url.clone())));
+        }
+        items.push((t(lang, "copy"), has_selection, CtxAction::Copy));
+        items.push((t(lang, "cm_select_all"), true, CtxAction::SelectAll));
+
+        // Не вылезать за края экрана.
+        let screen = ctx.viewport_rect();
+        let w = 240.0 * self.ui_scale();
+        let h = items.len() as f32 * (em * 1.7) + 10.0;
+        let pos = pos2(
+            menu.pos.x.min(screen.max.x - w - 6.0).max(screen.min.x + 4.0),
+            menu.pos.y.min(screen.max.y - h - 6.0).max(screen.min.y + 4.0),
+        );
+
+        let mut clicked: Option<usize> = None;
+        let resp = eframe::egui::Area::new(eframe::egui::Id::unique("ctx_menu"))
+            .order(eframe::egui::Order::Foreground)
+            .fixed_pos(pos)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let frame = eframe::egui::Frame::NONE
+                    .fill(pal.code_bg)
+                    .stroke(egui::Stroke::new(1.0, pal.border))
+                    .inner_margin(egui::Margin::same(4));
+                frame.show(ui, |ui| {
+                    ui.set_min_width(w - 8.0);
+                    ui.vertical(|ui| {
+                        for (i, (label, enabled, _)) in items.iter().enumerate() {
+                            if ctx_menu_item(ui, ("ctx_item", i), label, *enabled, em, pal)
+                                && clicked.is_none()
+                            {
+                                clicked = Some(i);
+                            }
+                        }
+                    });
+                });
+            })
+            .response;
+
+        if let Some(i) = clicked {
+            match items.swap_remove(i).2 {
+                CtxAction::CopyUrl(url) => crate::clipboard::copy_in_background(url),
+                CtxAction::Copy => self.copy_selection(),
+                CtxAction::SelectAll => {
+                    if let Some(tab) = self.tabs.get_mut(self.active)
+                        && let Some(doc) = state_doc(&tab.state)
+                    {
+                        tab.selection.select_all(doc);
+                        tab.selection.recompute_stats_if_due(doc);
+                    }
+                }
+            }
+            return; // действие закрывает меню
+        }
+        if resp.clicked_elsewhere() {
+            return; // клик мимо — закрыть
+        }
+        self.ctx_menu = Some(menu); // живём дальше
+    }
+
     fn handle_input(&mut self, ctx: &Context) {
         // Ctrl+O — диалог выбора файла.
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::O)) {
@@ -436,11 +489,39 @@ impl App {
             self.active = next_tab(self.active, self.tabs.len(), true);
         }
 
-        // Esc — закрыть панель настроек.
-        if self.show_settings
-            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
-        {
-            self.show_settings = false;
+        // Esc — закрыть панель настроек, иначе — снять выделение и контекст-меню.
+        if self.show_settings {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                self.show_settings = false;
+            }
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            self.ctx_menu = None;
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.selection.clear();
+            }
+        }
+
+        // Ctrl+A — выделить весь документ (виртуально, без раскладки).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::A)) {
+            if let Some(tab) = self.tabs.get_mut(self.active)
+                && let Some(doc) = state_doc(&tab.state)
+            {
+                tab.selection.select_all(doc);
+                tab.selection.recompute_stats_if_due(doc);
+            }
+        }
+
+        // Ctrl+C — выделение как plain text (клипборд — только из фона).
+        // egui-winit перехватывает Ctrl+C ДО Key-события (is_copy_command →
+        // синтетический Event::Copy, lib.rs egui-winit) — consume_key его не
+        // видит; забираем событие из очереди сами.
+        let copy_pressed = ctx.input_mut(|i| {
+            let before = i.events.len();
+            i.events.retain(|e| !matches!(e, egui::Event::Copy));
+            before != i.events.len()
+        });
+        if copy_pressed {
+            self.copy_selection();
         }
 
         // Ctrl+= / Ctrl+Plus — крупнее, Ctrl+- — мельче, Ctrl+0 — обычный размер.
@@ -704,12 +785,7 @@ impl eframe::App for App {
             self.settings.minimap_width = mm_w;
         }
 
-        // Статистика выделения (считается плагином в конце прохода).
-        let sel_stats: Option<SelStats> = ctx
-            .data(|d| d.get_temp(egui::Id::unique("sel_stats")))
-            .flatten();
-
-        // Статус-бар: статистика документа + тумблер «по ширине окна».
+        // Статус-бар: статистика документа + выделение + тумблеры панелей.
         let has_doc = matches!(
             self.tabs.get(self.active).map(|t| &t.state),
             Some(TabState::Ready(_)) | Some(TabState::Loading { .. })
@@ -721,7 +797,7 @@ impl eframe::App for App {
                 .exact_size(26.0)
                 .frame(Frame::NONE.fill(pal.code_bg))
                 .show(ui, |ui| {
-                    status_bar(ui, self, sel_stats);
+                    status_bar(ui, self);
                 });
         }
 
@@ -735,11 +811,12 @@ impl eframe::App for App {
             lang,
             fit_width: self.settings.fit_width,
             table_top: self.settings.table_top,
+            table_scroll: self.settings.table_scroll,
             code_line_numbers: self.settings.code_line_numbers,
             code_highlight: self.settings.code_highlight,
         };
 
-        let mut link_events: Vec<String> = Vec::new();
+        let mut doc_events: Vec<doc_view::DocEvent> = Vec::new();
         let mut welcome_clicked = false;
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(pal.bg))
@@ -752,6 +829,7 @@ impl eframe::App for App {
                     state,
                     layout,
                     path,
+                    selection,
                     ..
                 } = tab;
                 match state {
@@ -765,32 +843,31 @@ impl eframe::App for App {
                         if doc.blocks.is_empty() {
                             show_loading(ui, env.lang, ui_em);
                         } else {
-                            for ev in doc_view::show(ui, doc, layout, &env, *id) {
-                                match ev {
-                                    doc_view::DocEvent::OpenLink(url) => {
-                                        link_events.push(url)
-                                    }
-                                }
-                            }
+                            doc_events.extend(doc_view::show(ui, doc, layout, &env, *id, selection));
                         }
                     }
                     TabState::Ready(arc) => {
-                        for ev in doc_view::show(ui, arc, layout, &env, *id) {
-                            match ev {
-                                doc_view::DocEvent::OpenLink(url) => link_events.push(url),
-                            }
-                        }
+                        doc_events.extend(doc_view::show(ui, arc, layout, &env, *id, selection));
                     }
                 }
             });
-        for url in link_events {
-            self.open_link(&url, &ctx);
+        for ev in doc_events {
+            match ev {
+                doc_view::DocEvent::OpenLink(url) => self.open_link(&url, &ctx),
+                doc_view::DocEvent::ContextMenu { pos, link } => {
+                    self.ctx_menu = Some(CtxMenu { pos, link });
+                    ctx.request_repaint();
+                }
+            }
         }
         if welcome_clicked {
             if let Some(path) = pick_md_file() {
                 self.open(path);
             }
         }
+
+        // Контекст-меню — поверх всего, после центральной панели.
+        self.show_context_menu(&ctx);
 
         // Настройки изменились → нормализуем и запишем в settings.json
         // (с дебаунсом, чтобы слайдер не жал в диск каждый кадр).
@@ -1051,13 +1128,17 @@ fn settings_button(ui: &mut Ui, active: bool, pal: &themes::Palette, size: f32) 
     resp.clicked()
 }
 
-/// Статус-бар: слева — символы/строки/объём файла, справа — тумблер
-/// «растягивать текст по ширине окна».
-fn status_bar(ui: &mut Ui, app: &mut App, sel: Option<SelStats>) {
+/// Статус-бар: слева — символы/строки/объём файла + живая статистика
+/// выделения, справа — тумблеры панелей и «по ширине окна».
+fn status_bar(ui: &mut Ui, app: &mut App) {
     let pal = *app.pal();
     let lang = app.lang();
     let em = app.settings.ui_font_size as f32 * 0.85;
     let h = 26.0;
+    let sel: Option<SelStats> = app
+        .tabs
+        .get(app.active)
+        .and_then(|t| t.selection.stats);
 
     // Статистика активной вкладки (для загрузки — «чтение…»).
     let stats = match app.tabs.get(app.active).map(|t| &t.state) {
@@ -1221,6 +1302,46 @@ fn status_toggle(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp.clicked()
+}
+
+/// Плоский пункт контекст-меню: строка с hover-подсветкой; неактивный —
+/// приглушён и не кликается. Возвращает true в кадр клика.
+fn ctx_menu_item(
+    ui: &mut Ui,
+    salt: (&'static str, usize),
+    label: &str,
+    enabled: bool,
+    em: f32,
+    pal: &themes::Palette,
+) -> bool {
+    let g = crate::view::widgets::plain_galley(ui, label, em, pal.fg);
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), em * 1.7), Sense::hover());
+    let resp = ui.interact(
+        rect,
+        ui.scope_id().with(salt),
+        if enabled { Sense::click() } else { Sense::hover() },
+    );
+    let painter = ui.painter().clone();
+    let hovered = enabled && resp.hovered();
+    if hovered {
+        painter.rect_filled(rect, egui::CornerRadius::same(0), pal.inline_code_bg);
+    }
+    let color = if !enabled {
+        pal.faint
+    } else if hovered {
+        pal.fg
+    } else {
+        pal.muted
+    };
+    painter.galley_with_override_text_color(
+        pos2(rect.min.x + 10.0, rect.center().y - g.size().y * 0.5),
+        g,
+        color,
+    );
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    enabled && resp.clicked()
 }
 
 /// Число с разделителями разрядов (пробел по 3 цифры).

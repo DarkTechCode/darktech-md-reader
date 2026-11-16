@@ -23,3 +23,18 @@ pub fn copy_in_background(text: String) {
         BUSY.store(false, Ordering::Release);
     });
 }
+
+#[cfg(test)]
+mod tests {
+    /// Проверка реального обмена с системным клипбордом (трогает буфер
+    /// пользователя — запускать вручную: cargo test -- --ignored).
+    #[test]
+    #[ignore]
+    fn clipboard_roundtrip() {
+        super::copy_in_background("darktech-md-clipboard-test".into());
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut clip = arboard::Clipboard::new().expect("клипборд доступен");
+        let text = clip.get_text().expect("чтение из клипборда");
+        assert_eq!(text, "darktech-md-clipboard-test");
+    }
+}

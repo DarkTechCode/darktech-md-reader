@@ -191,6 +191,20 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> boo
     );
     s.table_top = top;
 
+    // Скролл в таблицах: выкл — широкие таблицы сжимаются в ширину колонки
+    // текста, ячейки переносятся по словам (без горизонтальной прокрутки).
+    let mut tscroll = s.table_scroll;
+    pills_row(
+        ui,
+        "table_scroll",
+        t(lang, "st_table_scroll"),
+        em,
+        pal,
+        &[(t(lang, "st_off"), false), (t(lang, "st_on"), true)],
+        &mut tscroll,
+    );
+    s.table_scroll = tscroll;
+
     // Нумерация строк в блоках кода.
     let mut nums = s.code_line_numbers;
     pills_row(
@@ -303,13 +317,13 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> boo
             pal.muted,
         );
     });
-    // Подпись-ссылки: метка («email:», «сайт:», «github:») — обычный текст,
+    // Подпись-ссылки: метка («Email:», «Сайт:», «GitHub:») — обычный текст,
     // значение — ссылка (открывается в браузере).
     let links = [
-        ("email", "md@darktech.ru", "mailto:md@darktech.ru"),
+        ("Email", "md@darktech.ru", "mailto:md@darktech.ru"),
         (t(lang, "st_site"), "https://darktech.ru", "https://darktech.ru"),
         (
-            "github",
+            "GitHub",
             "https://github.com/darkTechCode/",
             "https://github.com/darkTechCode/",
         ),
@@ -349,6 +363,8 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> boo
             }
         });
     }
+    // Нижний отступ: последняя строка не прилипает к краю окна при скролле.
+    ui.add_space(20.0);
     restart
 }
 

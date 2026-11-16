@@ -3,8 +3,8 @@
 //! LayoutState), скроллбар уточняется по мере измерения.
 
 use eframe::egui::{
-    self, pos2, scroll_area, Color32, Id, Key, PointerButton, Rect, ScrollArea, Sense, Stroke, Ui,
-    Vec2,
+    self, pos2, scroll_area, Color32, Id, Key, PointerButton, Pos2, Rect, ScrollArea, Sense,
+    Stroke, Ui, Vec2,
 };
 
 use crate::layout::{measure, LayoutKey, LayoutState};
@@ -12,6 +12,7 @@ use crate::md::blocks::Doc;
 
 use super::nav;
 use super::render;
+use super::selection::{self, SelFrame, SelectionState};
 use super::themes::{self, lighten};
 use super::Env;
 
@@ -19,6 +20,11 @@ use super::Env;
 #[derive(Clone, Debug)]
 pub enum DocEvent {
     OpenLink(String),
+    /// Правый клик: показать контекст-меню в позиции (возможно, на ссылке).
+    ContextMenu {
+        pos: Pos2,
+        link: Option<String>,
+    },
 }
 
 /// Запас рендера сверху/снизу от вьюпорта, px.
@@ -44,6 +50,7 @@ pub fn show(
     layout: &mut LayoutState,
     env: &Env,
     tab_key: u64,
+    sel: &mut SelectionState,
 ) -> Vec<DocEvent> {
     let mut events = Vec::new();
     // Тот же id, что у ScrollArea (make_persistent_id = scope_id.with(salt)).
@@ -114,6 +121,7 @@ pub fn show(
                 dark: env.pal.bg == themes::DARK.bg,
                 lang: env.lang,
                 code_nums: env.code_line_numbers,
+                table_scroll: env.table_scroll,
             },
         );
 
@@ -128,6 +136,15 @@ pub fn show(
             .visible_range(viewport.min.y - OVERSCAN, viewport.max.y + OVERSCAN)
             .start;
 
+        // Собственное выделение: области регистрируются при отрисовке,
+        // мышь обрабатывается после (драг над областью — прямо в place_text).
+        let mut frame = SelFrame {
+            sel,
+            regions: Vec::new(),
+            pointer: ui.input(|i| i.pointer.interact_pos()),
+            link_hover: false,
+        };
+
         let mut y = origin.y + TOP_PAD + layout.offset(i0);
         for i in layout.visible_range(viewport.min.y - OVERSCAN, viewport.max.y + OVERSCAN) {
             let block = &doc.blocks[i];
@@ -139,13 +156,25 @@ pub fn show(
             let h = layout.height(i);
             let rect = Rect::from_min_size(pos2(x0, y), Vec2::new(col, h));
             let prep = layout.prepared_mut(i).expect("prepared только что создан");
-            let (ev, new_h) = render::render_block(ui, rect, vis, tab_key, i, block, prep, env);
+            let (ev, new_h) = render::render_block(ui, rect, vis, tab_key, i, block, prep, env, &mut frame);
             if let Some(h) = new_h {
                 layout.set_measured(i, h);
             }
             events.extend(ev);
             y += layout.height(i);
         }
+
+        selection::end_frame(
+            ui,
+            doc,
+            &frame.regions,
+            ui.max_rect(),
+            frame.sel,
+            frame.link_hover,
+            &mut events,
+        );
+        // Живая статистика выделения (гигантские диапазоны — по отпусканию).
+        frame.sel.recompute_stats_if_due(doc);
 
         if layout.finish_frame(i0) {
             ui.ctx().request_repaint();

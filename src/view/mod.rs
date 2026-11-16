@@ -5,6 +5,7 @@ pub mod minimap;
 pub mod nav;
 pub mod outline;
 pub mod render;
+pub mod selection;
 pub mod settings_panel;
 pub mod themes;
 pub mod widgets;
@@ -22,6 +23,9 @@ pub struct Env<'a> {
     pub fit_width: bool,
     /// Выравнивать ячейки таблиц по верхнему краю (иначе по центру).
     pub table_top: bool,
+    /// Горизонтальный скролл в таблицах (выкл — колонки сжимаются до ширины
+    /// колонки текста, содержимое ячеек переносится по словам).
+    pub table_scroll: bool,
     /// Нумерация строк в блоках кода.
     pub code_line_numbers: bool,
     /// Подсветка синтаксиса в блоках кода.

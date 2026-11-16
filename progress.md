@@ -76,6 +76,12 @@ assets/fonts/          *.ttf + OFL-*.txt
 - `eframe::App` — метод `fn ui(&mut self, ui: &mut egui::Ui, frame: &mut Frame)` (не `update`).
 - Панели: `egui::Panel::top("id").show(ui, …)`, `CentralPanel::default().show(ui, …)`
   (не `show_inside`, `TopBottomPanel` больше нет).
+- ТЕМЫ: egui держит стиль ПО ТЕМЕ (Dark/Light) и выбирает по ThemePreference (по умолчанию
+  System!). `ctx.set_visuals` пишет в ТЕКУЩУЮ тему — если системная светлая, стиль уйдёт в
+  Dark, а рендер — Light-дефолт. Лечится `ctx.set_theme(ThemePreference::Dark)` при старте
+  (app.rs) + страховка в начале кадра: если `ui.visuals().panel_fill != наша` — пере-применить
+  `themes::apply`. Цвета скроллбара: трек = `visuals.extreme_bg_color`, ручка =
+  `visuals.widgets.{inactive,hovered}.bg_fill`, углы = `widgets.*.corner_radius`.
 - `painter.rect(...)` требует 5-й аргумент `StrokeKind::Middle`; `rect_filled` — 4 аргумента.
 - `FontId { size, family }` — веса нет; bold = `TextFormat.coords = VariationCoords::new([(b"wght", 700.0)])`
   (пути: `egui::epaint::text::VariationCoords`); курсив — `TextFormat.italics = true` (синтез).

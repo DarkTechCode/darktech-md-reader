@@ -3,7 +3,8 @@
 //! LayoutState), скроллбар уточняется по мере измерения.
 
 use eframe::egui::{
-    self, pos2, scroll_area, Color32, Id, Rect, ScrollArea, Sense, Stroke, Ui, Vec2,
+    self, pos2, scroll_area, Color32, Id, Key, PointerButton, Rect, ScrollArea, Sense, Stroke, Ui,
+    Vec2,
 };
 
 use crate::layout::{measure, LayoutKey, LayoutState};
@@ -28,9 +29,12 @@ const FAB_SIZE: f32 = 44.0;
 const FAB_MARGIN_BOTTOM: f32 = 20.0;
 /// Справа — с учётом ширины скроллбара, чтобы зазор был как снизу.
 const FAB_MARGIN_RIGHT: f32 = FAB_MARGIN_BOTTOM + 26.0;
-const FAB_BG: Color32 = Color32::from_rgb(0x22, 0x22, 0x26);
-const FAB_CHEVRON: Color32 = Color32::from_rgb(0x6D, 0x6D, 0x6C);
 const FAB_ACCENT: Color32 = Color32::from_rgb(64, 140, 255);
+
+/// Автоскролл средней кнопкой: мёртвая зона и разгон (px/s на px дистанции).
+const AUTOSCROLL_DEAD: f32 = 16.0;
+const AUTOSCROLL_GAIN: f32 = 6.0;
+const AUTOSCROLL_MAX: f32 = 2400.0;
 
 pub fn show(
     ui: &mut Ui,
@@ -44,8 +48,8 @@ pub fn show(
     let scroll_id = ui.scope_id().with(("doc_scroll", tab_key));
     let fab_id = ui.scope_id().with(("fab_top", tab_key));
 
-    // Принудительный оффсет этого кадра: просьба «наверх» или компенсация
-    // «прилипания» (высоты выше вьюпорта изменились — держим контент на месте).
+    // Принудительный оффсет этого кадра: просьба «наверх», автоскролл или
+    // компенсация «прилипания» (высоты выше вьюпорта изменились).
     let mut forced: Option<f32> = None;
     let to_top = ui.ctx().data_mut(|d| {
         let v = d.get_temp::<bool>(fab_id).unwrap_or(false);
@@ -54,8 +58,17 @@ pub fn show(
         }
         v
     });
+    let as_off_key = ui.scope_id().with(("autoscroll_off", tab_key));
     if to_top {
         forced = Some(0.0);
+    } else if let Some(off) = ui.ctx().data_mut(|d| {
+        let v = d.get_temp::<f32>(as_off_key);
+        if v.is_some() {
+            d.remove::<f32>(as_off_key);
+        }
+        v
+    }) {
+        forced = Some(off);
     } else if let Some(delta) = layout.take_pending_scroll() {
         let cur = scroll_area::State::load(ui.ctx(), scroll_id)
             .map(|s| s.clamped_offset().y)
@@ -72,13 +85,25 @@ pub fn show(
 
     let out = sa.show_viewport(ui, |ui, viewport| {
         let avail = ui.available_width();
-        let col = env.typo.width.min(avail).max(300.0);
+        // «По ширине окна»: колонка на всё, но с полями 20px, чтобы текст
+        // не прилипал к краям (и не мешал скроллбару). Ось — целые пиксели:
+        // дробная ширина дрожала бы раскладкой при каждом пикселе ресайза.
+        const FIT_PAD: f32 = 20.0;
+        let col = if env.fit_width {
+            avail - FIT_PAD * 2.0
+        } else {
+            env.typo.width.min(avail)
+        }
+        .floor()
+        .max(300.0);
         layout.ensure(
             doc,
             LayoutKey {
                 typo: *env.typo,
                 width: col,
                 dark: env.pal.bg == themes::DARK.bg,
+                lang: env.lang,
+                code_nums: env.code_line_numbers,
             },
         );
 
@@ -122,13 +147,92 @@ pub fn show(
     let scrollable = (out.content_size.y - out.inner_rect.height()).max(1.0);
     let progress = (offset / scrollable).clamp(0.0, 1.0);
     if progress > 0.001 {
-        show_fab(ui, progress, fab_id);
+        show_fab(ui, progress, fab_id, env);
     }
+
+    autoscroll(ui, &out, tab_key, env);
     events
 }
 
+/// Плавный автоскролл средней кнопкой (как в браузерах): клик по документу —
+/// якорь; чем дальше курсор от якоря, тем быстрее прокрутка. Повторный клик,
+/// колесо или Esc выключают. Следующий оффсет прокидывается через temp-data
+/// и применяется в начале следующего кадра (как «наверх» / компенсация).
+fn autoscroll(
+    ui: &mut Ui,
+    out: &egui::containers::scroll_area::ScrollAreaOutput<()>,
+    tab_key: u64,
+    env: &Env,
+) {
+    let key = ui.scope_id().with(("autoscroll", tab_key));
+    let off_key = ui.scope_id().with(("autoscroll_off", tab_key));
+    let mut anchor: Option<egui::Pos2> = ui.ctx().data_mut(|d| d.get_temp(key)).flatten();
+
+    // Клик средней кнопкой по области документа — вкл/выкл.
+    let mid_pressed = ui.input(|i| i.pointer.button_pressed(PointerButton::Middle));
+    if mid_pressed {
+        let pos = ui.input(|i| i.pointer.interact_pos());
+        anchor = match (anchor, pos) {
+            (Some(_), _) => None,
+            (None, Some(p)) if out.inner_rect.contains(p) => Some(p),
+            _ => None,
+        };
+    }
+    // Колесо или Esc — выключить.
+    let wheeled =
+        ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. })));
+    if anchor.is_some() && (wheeled || ui.input(|i| i.key_pressed(Key::Escape))) {
+        anchor = None;
+    }
+    ui.ctx().data_mut(|d| d.insert_temp(key, anchor));
+    let Some(anchor) = anchor else { return };
+
+    let dir = if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+        let dy = p.y - anchor.y;
+        if dy.abs() <= AUTOSCROLL_DEAD {
+            0.0
+        } else {
+            let v = ((dy.abs() - AUTOSCROLL_DEAD) * AUTOSCROLL_GAIN).min(AUTOSCROLL_MAX);
+            dy.signum() * v
+        }
+    } else {
+        0.0
+    };
+
+    if dir != 0.0 {
+        let dt = ui.input(|i| i.unstable_dt).min(0.1);
+        let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+        let cur = out.state.clamped_offset().y;
+        let next = (cur + dir * dt).clamp(0.0, max);
+        if (next - cur).abs() > 0.01 {
+            ui.ctx().data_mut(|d| d.insert_temp(off_key, next));
+        }
+    }
+
+    // Индикатор-«якорь»: кружок с шевронами; активное направление — акцентом.
+    let painter = ui.painter().clone();
+    let r = 14.0;
+    painter.circle(anchor, r, env.pal.bg, Stroke::new(1.5, env.pal.border));
+    // Шеврон остриём вверх или вниз (направление прокрутки).
+    let chevron = |cy: f32, s: f32, up: bool, color: Color32| {
+        let (tip_y, side_y) = if up { (cy - s * 0.28, cy + s * 0.22) } else { (cy + s * 0.28, cy - s * 0.22) };
+        painter.line_segment(
+            [pos2(anchor.x - s * 0.5, side_y), pos2(anchor.x, tip_y)],
+            Stroke::new(1.8, color),
+        );
+        painter.line_segment(
+            [pos2(anchor.x + s * 0.5, side_y), pos2(anchor.x, tip_y)],
+            Stroke::new(1.8, color),
+        );
+    };
+    chevron(anchor.y - 6.0, 7.0, true, if dir < 0.0 { env.pal.link } else { env.pal.faint });
+    chevron(anchor.y + 6.0, 7.0, false, if dir > 0.0 { env.pal.link } else { env.pal.faint });
+
+    ui.ctx().request_repaint();
+}
+
 /// Круглая кнопка «наверх» с индикатором прогресса чтения по обводке.
-fn show_fab(ui: &mut Ui, progress: f32, scroll_top_id: Id) {
+fn show_fab(ui: &mut Ui, progress: f32, scroll_top_id: Id, env: &Env) {
     let bounds = ui.max_rect();
     let min = pos2(
         bounds.max.x - FAB_MARGIN_RIGHT - FAB_SIZE,
@@ -140,21 +244,28 @@ fn show_fab(ui: &mut Ui, progress: f32, scroll_top_id: Id) {
     let center = rect.center();
     let radius = FAB_SIZE * 0.5;
 
-    // Тёмный фон, при наведении — чуть светлее (шеврон остаётся читаемым).
     let hovered = resp.hovered();
     let bg = if hovered {
-        lighten(FAB_BG, 0.15)
+        lighten(env.pal.fab_bg, 0.12)
     } else {
-        FAB_BG
+        env.pal.fab_bg
     };
     let chevron = if hovered {
-        lighten(FAB_CHEVRON, 0.35)
+        env.pal.fg
     } else {
-        FAB_CHEVRON
+        env.pal.fab_chevron
     };
-    painter.circle(center, radius, bg, Stroke::NONE);
+    let border = env.pal.fab_border;
+    let stroke = if border == Color32::TRANSPARENT {
+        Stroke::NONE
+    } else if hovered {
+        Stroke::new(1.5, env.pal.muted)
+    } else {
+        Stroke::new(1.0, border)
+    };
+    painter.circle(center, radius, bg, stroke);
 
-    // Обводка-прогресс: ярко-синяя дуга, полный круг в самом низу.
+    // Обводка-прогресс: акцентная дуга, полный круг в самом низу.
     let a0 = -std::f32::consts::FRAC_PI_2;
     let sweep = std::f32::consts::TAU * progress.clamp(0.0, 1.0);
     let steps = ((progress * 64.0).ceil() as usize).max(2);

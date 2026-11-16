@@ -1,6 +1,8 @@
 //! Палитры (дух MarkMello) и типографика документа из настроек.
 
 use eframe::egui::{self as egui, Color32, Context, FontFamily, Visuals};
+use eframe::egui::epaint::text::TextOptions;
+use serde::{Deserialize, Serialize};
 
 use crate::fonts;
 
@@ -36,6 +38,10 @@ pub struct Palette {
     pub alert_important: Color32,
     pub alert_warning: Color32,
     pub alert_caution: Color32,
+    /// Кнопка «наверх»: фон, шеврон, рамка (в тёмной рамки нет).
+    pub fab_bg: Color32,
+    pub fab_chevron: Color32,
+    pub fab_border: Color32,
 }
 
 const fn rgb(r: u8, g: u8, b: u8) -> Color32 {
@@ -60,6 +66,9 @@ pub const DARK: Palette = Palette {
     alert_important: rgb(171, 125, 248),
     alert_warning: rgb(210, 153, 34),
     alert_caution: rgb(248, 81, 73),
+    fab_bg: rgb(34, 34, 38),
+    fab_chevron: rgb(109, 109, 108),
+    fab_border: Color32::TRANSPARENT,
 };
 
 pub const LIGHT: Palette = Palette {
@@ -80,6 +89,9 @@ pub const LIGHT: Palette = Palette {
     alert_important: rgb(134, 74, 224),
     alert_warning: rgb(174, 119, 19),
     alert_caution: rgb(207, 45, 38),
+    fab_bg: rgb(255, 255, 255),
+    fab_chevron: rgb(105, 105, 103),
+    fab_border: rgb(216, 214, 210),
 };
 
 /// Осветление цвета к белому (для hover-состояний).
@@ -88,8 +100,38 @@ pub fn lighten(c: Color32, k: f32) -> Color32 {
     Color32::from_rgb(ch(c.r()), ch(c.g()), ch(c.b()))
 }
 
-/// Применяет палитру к визуальному стилю egui (панели, выделение, ссылки).
-pub fn apply(ctx: &Context, pal: &Palette, dark: bool) {
+/// Применяет палитры к egui. ВАЖНО: пишем в ОБА слота тем (Dark и Light) —
+/// активный слот выбирается ThemePreference/системой и может переключиться
+/// среди кадра; если палитра лежит только в активном, новый слот отдаст
+/// дефолты egui (микс стилей).
+pub fn apply(ctx: &Context) {
+    // text_options ФИКСИРУЕМ одни на оба слота: у Visuals::dark()/light()
+    // разные color_transfer_function — если значение меняется при смене
+    // темы, egui сбрасывает ВЕСЬ атлас глифов (Fonts::set_options →
+    // GlyphAtlas::new). Закэшированные нами Arc<Galley> при этом остаются
+    // со старыми UV → «кракозябры»/пропадающий текст + фриз на
+    // ре-растеризации. Берём текущие text_options активного слота.
+    let text_options = ctx.global_style().visuals.text_options;
+    ctx.set_visuals_of(egui::Theme::Dark, visuals(&DARK, true, text_options));
+    ctx.set_visuals_of(egui::Theme::Light, visuals(&LIGHT, false, text_options));
+
+    // Широкий «виндоузовый» скроллбар: сплошной, всегда видимый, легко схватить.
+    ctx.all_styles_mut(|style| {
+        style.spacing.scroll = egui::style::ScrollStyle {
+            floating: false,
+            bar_width: 20.0,
+            handle_min_length: 32.0,
+            bar_inner_margin: 1.0,
+            bar_outer_margin: 0.0,
+            dormant_background_opacity: 1.0,
+            dormant_handle_opacity: 1.0,
+            ..egui::style::ScrollStyle::solid()
+        };
+    });
+}
+
+/// Визуальный стиль egui из палитры (панели, выделение, ссылки, скроллбар).
+fn visuals(pal: &Palette, dark: bool, text_options: TextOptions) -> Visuals {
     let mut vis = if dark {
         Visuals::dark()
     } else {
@@ -111,25 +153,13 @@ pub fn apply(ctx: &Context, pal: &Palette, dark: bool) {
     vis.widgets.inactive.corner_radius = egui::CornerRadius::same(0);
     vis.widgets.hovered.corner_radius = egui::CornerRadius::same(0);
     vis.widgets.active.corner_radius = egui::CornerRadius::same(0);
-    ctx.set_visuals(vis);
-
-    // Широкий «виндоузовый» скроллбар: сплошной, всегда видимый, легко схватить.
-    ctx.all_styles_mut(|style| {
-        style.spacing.scroll = egui::style::ScrollStyle {
-            floating: false,
-            bar_width: 20.0,
-            handle_min_length: 32.0,
-            bar_inner_margin: 1.0,
-            bar_outer_margin: 0.0,
-            dormant_background_opacity: 1.0,
-            dormant_handle_opacity: 1.0,
-            ..egui::style::ScrollStyle::solid()
-        };
-    });
+    vis.text_options = text_options;
+    vis
 }
 
-/// Выбор шрифта документа.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Выбор шрифта документа (в settings.json — "serif"/"sans"/"mono").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum FontChoice {
     Serif,
     Sans,

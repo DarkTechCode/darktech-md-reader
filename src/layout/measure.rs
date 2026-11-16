@@ -150,7 +150,9 @@ pub struct CodePrep {
     pub line_h: f32,
     /// Байтовые смещения начал строк кода (для нарезки видимого окна).
     pub line_starts: Vec<u32>,
-    /// Полная ширина контента (самая длинная строка + паддинги).
+    /// Ширина гуттера с номерами строк (0 — нумерация выключена).
+    pub gutter_w: f32,
+    /// Полная ширина контента (гуттер + самая длинная строка + паддинги).
     pub content_w: f32,
     /// Резерв под горизонтальный скроллбар (если строки шире колонки).
     pub bar_space: f32,
@@ -228,10 +230,18 @@ pub fn char_starts(spans: &[Span]) -> Vec<usize> {
 // и измерения, чтобы скроллбар не прыгал.
 // ---------------------------------------------------------------------------
 
-/// Внешний отступ блока кода сверху/снизу.
-pub fn gap_code(em: f32) -> f32 {
+/// Внешний отступ блока кода сверху (щедрый — зрительно отделяет блок).
+pub fn gap_code_top(em: f32) -> f32 {
+    1.15 * em
+}
+
+/// Внешний отступ блока кода снизу.
+pub fn gap_code_bottom(em: f32) -> f32 {
     0.85 * em
 }
+
+/// Высота полосы кнопки копирования внизу блока кода.
+pub const CODE_FOOTER_H: f32 = 30.0;
 
 fn heading_before(level: u8) -> f32 {
     match level {
@@ -285,7 +295,12 @@ pub fn estimate(block: &BlockKind, typo: &Typo, col_w: f32) -> f32 {
         }
         BlockKind::Code { code, .. } => {
             let lines = code.bytes().filter(|b| *b == b'\n').count() + 1;
-            gap_code(em) * 2.0 + 32.0 + 24.0 + lines as f32 * (em * 0.84 * 1.55)
+            gap_code_top(em)
+                + gap_code_bottom(em)
+                + 32.0
+                + 24.0
+                + CODE_FOOTER_H
+                + lines as f32 * (em * 0.84 * 1.55)
         }
         BlockKind::Table { rows, .. } => 1.65 * em + rows.len() as f32 * (em * 1.4 + 6.0),
         BlockKind::Rule => 1.6 * em + 1.0,
@@ -552,11 +567,25 @@ fn measure_code(
         max_chars = max_chars.max(line.chars().count());
     }
     let char_w = mono_char_w(ui, code_em);
-    let content_w = max_chars as f32 * char_w + 24.0;
+    // Гуттер номеров строк (если включён в настройках): ширина самого
+    // широкого номера + зазор 20px до кода (номера прижаты влево).
+    let gutter_w = if env.code_line_numbers {
+        let digits = line_starts.len().to_string().len();
+        digits as f32 * char_w + 20.0
+    } else {
+        0.0
+    };
+    let content_w = gutter_w + max_chars as f32 * char_w + 24.0;
     let lines = line_starts.len().max(1);
     // Широкие строки → горизонтальный скроллбар, резервируем под него место.
     let bar_space = if content_w > col_w { BAR_H } else { 0.0 };
-    let h = gap_code(em) * 2.0 + 32.0 + 24.0 + lines as f32 * line_h + bar_space;
+    let h = gap_code_top(em)
+        + gap_code_bottom(em)
+        + 32.0
+        + 24.0
+        + CODE_FOOTER_H
+        + lines as f32 * line_h
+        + bar_space;
 
     let prep = CodePrep {
         label,
@@ -565,6 +594,7 @@ fn measure_code(
         header_h: 32.0,
         line_h,
         line_starts,
+        gutter_w,
         content_w,
         bar_space,
         height: h,
@@ -641,8 +671,25 @@ fn measure_table(
             *w += extra;
         }
     }
-    let total_w = total.max(col_w);
-    let bar_space = if total_w > col_w { BAR_H } else { 0.0 };
+    let (total_w, bar_space) = if env.fit_width && !cols.is_empty() {
+        // Режим «по ширине окна»: ровно на колонку, без горизонтального
+        // скролла — широкие колонки сжимаются пропорционально, содержимое
+        // переносится на новые строки в ячейках.
+        let sum = total.max(1.0);
+        for w in &mut cols {
+            *w = (*w * col_w / sum).max(24.0);
+        }
+        // После пола в 24px — нормализуем обратно ровно к col_w.
+        let s2 = cols.iter().sum::<f32>().max(1.0);
+        for w in &mut cols {
+            *w *= col_w / s2;
+        }
+        (col_w, 0.0)
+    } else {
+        let total_w = total.max(col_w);
+        let bar_space = if total_w > col_w { BAR_H } else { 0.0 };
+        (total_w, bar_space)
+    };
 
     let row_est = em * 1.4 + 6.0;
     let height = 0.95 * em + rows.len() as f32 * row_est + 0.7 * em + bar_space;

@@ -45,8 +45,8 @@ pub fn render_block(
             (BlockKind::ListItem { spans, .. }, Prepared::Text(p)) => {
                 (text::render_text(ui, rect, spans, p, env), None)
             }
-            (BlockKind::Code { code, .. }, Prepared::Code(p)) => {
-                code::render_code(ui, rect, vis, idx, code, p, env)
+            (BlockKind::Code { lang, code }, Prepared::Code(p)) => {
+                code::render_code(ui, rect, vis, idx, lang, code, p, env)
             }
             (BlockKind::Table { aligns, rows }, Prepared::Table(p)) => {
                 table::render_table(ui, rect, vis, idx, aligns, rows, p, env)

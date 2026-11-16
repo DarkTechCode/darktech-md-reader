@@ -25,6 +25,8 @@ pub enum ParseMsg {
     },
     Done {
         word_count: usize,
+        char_count: usize,
+        line_count: usize,
         /// Исходный текст возвращается в UI по готовности (Arc — дёшево).
         source: Arc<str>,
     },
@@ -62,8 +64,11 @@ pub fn parse_background(path: PathBuf, tx: Sender<ParseMsg>) {
             }
         }
         st.send_chunk(&tx);
+        let (char_count, line_count) = count_stats(&source);
         let _ = tx.send(ParseMsg::Done {
             word_count: source.split_whitespace().count(),
+            char_count,
+            line_count,
             source,
         });
     });
@@ -180,12 +185,26 @@ pub fn parse(source: Arc<str>) -> Doc {
     for (event, range) in Parser::new_ext(&source, opts()).into_offset_iter() {
         handle_event(&mut st, event, range);
     }
+    let (char_count, line_count) = count_stats(&source);
     Doc {
         word_count: source.split_whitespace().count(),
+        char_count,
+        line_count,
         source,
         blocks: st.blocks,
         headings: st.headings,
     }
+}
+
+/// Символы и строки исходника (для статус-бара). Один проход.
+fn count_stats(source: &str) -> (usize, usize) {
+    let chars = source.chars().count();
+    let lines = if source.is_empty() {
+        0
+    } else {
+        source.bytes().filter(|b| *b == b'\n').count() + 1
+    };
+    (chars, lines)
 }
 
 fn handle_event(st: &mut State, event: Event, range: Range<usize>) {

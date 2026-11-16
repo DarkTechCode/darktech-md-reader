@@ -5,6 +5,7 @@
 pub mod cache;
 pub mod measure;
 
+use crate::i18n::Lang;
 use crate::md::blocks::Doc;
 use crate::view::themes::Typo;
 
@@ -18,6 +19,10 @@ pub struct LayoutKey {
     /// Ширина текстовой колонки.
     pub width: f32,
     pub dark: bool,
+    /// Язык интерфейса (перевешиваются подписи alert-цитат).
+    pub lang: Lang,
+    /// Нумерация строк кода (меняет ширину гуттера).
+    pub code_nums: bool,
 }
 
 /// Высоты блоков + префикс-суммы + кэш готовых к отрисовке блоков.

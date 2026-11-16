@@ -1,7 +1,7 @@
 //! Плоские UI-примитивы (без скруглений и рамок egui-кнопок).
 
 use eframe::egui::{Color32, Sense, Stroke, StrokeKind, Ui};
-use eframe::egui::text::{ByteIndex, LayoutJob, LayoutSection, TextFormat};
+use eframe::egui::text::{ByteIndex, Galley, LayoutJob, LayoutSection, TextFormat};
 
 fn single_span_job(ui: &Ui, text: &str, size: f32, color: Color32, mono: bool) -> std::sync::Arc<eframe::egui::text::Galley> {
     let mut job = LayoutJob::default();
@@ -23,6 +23,11 @@ fn single_span_job(ui: &Ui, text: &str, size: f32, color: Color32, mono: bool) -
     });
     job.text.push_str(text);
     ui.painter().layout_job(job)
+}
+
+/// Готовый galley одного спана (Proportional), без выделения места в layout.
+pub fn plain_galley(ui: &Ui, text: &str, size: f32, color: Color32) -> std::sync::Arc<Galley> {
+    single_span_job(ui, text, size, color, false)
 }
 
 /// Текстовая кнопка: меняет цвет при наведении, без фона и скруглений.

@@ -107,7 +107,11 @@ fn scroll_rows(
                         MdAlign::Center => x + (cw - g.size().x) / 2.0,
                         _ => x + pad_h,
                     };
-                    let ty = row_top + (rh - g.size().y) / 2.0;
+                    let ty = if env.table_top {
+                        row_top + pad_v
+                    } else {
+                        row_top + (rh - g.size().y) / 2.0
+                    };
                     let cell_rect = Rect::from_min_size(pos2(tx, ty), g.size());
                     ui.put(cell_rect, eframe::egui::Label::new(g.clone()));
                     x += cw;

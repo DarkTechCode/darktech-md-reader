@@ -12,6 +12,10 @@ pub struct Doc {
     pub headings: Vec<Heading>,
     /// Приблизительное число слов (для статус-бара).
     pub word_count: usize,
+    /// Символов в исходнике (для статус-бара).
+    pub char_count: usize,
+    /// Строк в исходнике (для статус-бара).
+    pub line_count: usize,
 }
 
 impl Doc {
@@ -22,6 +26,8 @@ impl Doc {
             blocks: Vec::new(),
             headings: Vec::new(),
             word_count: 0,
+            char_count: 0,
+            line_count: 0,
         }
     }
 }

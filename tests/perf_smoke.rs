@@ -86,8 +86,17 @@ fn streaming_first_chunk_under_1s() {
                 blocks += b.len();
                 prev_len = Some(b.len());
             }
-            ParseMsg::Done { word_count, source } => {
+            ParseMsg::Done {
+                word_count,
+                char_count,
+                line_count,
+                source,
+            } => {
                 assert!(word_count > 1_000_000, "слова посчитаны: {word_count}");
+                // Байтов больше, чем символов (кириллица — 2 байта): 20 МБ
+                // текста — заведомо больше 10 М символов.
+                assert!(char_count > 10_000_000, "символы посчитаны");
+                assert!(line_count > 10_000, "строки посчитаны");
                 assert!(source.len() > 20 * 1024 * 1024);
                 assert!(blocks > 10_000, "блоков: {blocks}");
                 assert!(prev_len.is_some(), "хотя бы один чанк");
@@ -123,6 +132,8 @@ fn layout_state_visible_range_and_anchor() {
         typo,
         width: 820.0,
         dark: true,
+        lang: darktech_md::i18n::Lang::Ru,
+        code_nums: false,
     };
     let mut layout = LayoutState::default();
     layout.ensure(&doc, key);

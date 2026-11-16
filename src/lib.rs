@@ -3,7 +3,9 @@
 pub mod app;
 pub mod clipboard;
 pub mod fonts;
+pub mod highlight;
 pub mod i18n;
 pub mod layout;
 pub mod md;
+pub mod settings;
 pub mod view;

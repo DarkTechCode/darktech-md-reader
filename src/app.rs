@@ -1,7 +1,8 @@
 //! Состояние приложения: вкладки, ввод (CLI/drag-drop/Ctrl+O), панели.
 //! Большие файлы грузятся фоном: UI показывает блоки по мере разбора.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -16,13 +17,14 @@ use eframe::egui::text::{ByteIndex, Galley, LayoutJob, LayoutSection, TextFormat
 use crate::i18n::{t, Lang};
 use crate::layout::LayoutState;
 use crate::md::anchors;
-use crate::md::blocks::Doc;
+use crate::md::blocks::{self, Doc};
 use crate::md::parser::{self, ParseMsg};
-use crate::settings::model::{self, PanelMode, SettingsData, Side, ThemeMode, WIDTH_PRESETS};
+use crate::settings::model::{self, PanelMode, SettingsData, SessionData, Side, TabSession, ThemeMode, WIDTH_PRESETS};
 use crate::settings::store;
 use crate::view::selection::{self, SelStats, SelectionState};
 use crate::view::themes::Typo;
 use crate::view::{doc_view, find, find_bar, minimap, nav, outline, settings_panel, themes, welcome, Env};
+use crate::watcher::{self, FileEvent};
 use crate::fonts;
 use eframe::egui::Pos2;
 
@@ -34,6 +36,10 @@ pub struct App {
     active: usize,
     /// Настройки (settings.json): типографика документа, тема, язык, UI-шрифт.
     settings: SettingsData,
+    /// Контекст egui (сохранение сессии при выходе/перезапуске).
+    egui_ctx: Context,
+    /// Слежение за файлами вкладок: перечитать при изменении (этап 6).
+    watcher: watcher::Watcher,
     /// Применённый режим темы (чтобы поймать смену System↔явной).
     applied_theme: ThemeMode,
     /// Применённая (эффективная) тёмная тема: выбор пользователя или системы.
@@ -42,6 +48,8 @@ pub struct App {
     show_settings: bool,
     /// Открытое контекст-меню документа (правый клик).
     ctx_menu: Option<CtxMenu>,
+    /// Открытое контекст-меню вкладки (правый клик по имени файла).
+    tab_menu: Option<TabMenu>,
     /// Счётчик id вкладок (стабильные id скроллов/блоков на переключение вкладок).
     next_tab_id: u64,
     /// Последний выставленный заголовок окна (чтобы не спамить командой).
@@ -56,11 +64,23 @@ struct CtxMenu {
     link: Option<String>,
 }
 
+/// Открытое контекст-меню вкладки: позиция клика и вкладка.
+struct TabMenu {
+    pos: Pos2,
+    idx: usize,
+}
+
 /// Действие контекст-меню (применяется после отрисовки).
 enum CtxAction {
     CopyUrl(String),
     Copy,
     SelectAll,
+}
+
+/// Действие контекст-меню вкладки.
+enum TabCtxAction {
+    Explorer,
+    SaveAs,
 }
 
 /// Слова в минуту для оценки времени чтения (как у MarkMello).
@@ -79,6 +99,15 @@ pub struct Tab {
     pub selection: SelectionState,
     /// Поиск по документу этой вкладки.
     pub find: find::FindState,
+    /// Файл недоступен (watcher): баннер над документом, содержимое
+    /// остаётся читаемым; при появлении файла вкладка перечитается.
+    pub missing: bool,
+    /// Отложенное восстановление позиции чтения (сессия/перезагрузка):
+    /// применяет doc_view, когда документ готов и раскладка обеспечена.
+    pub pending_restore: Option<nav::RestorePos>,
+    /// Префикс текста якорного блока — сверка с новым документом
+    /// (индексы блоков при перечитывании плывут).
+    pub anchor: Option<String>,
 }
 
 pub enum TabState {
@@ -102,6 +131,9 @@ impl Tab {
             toc: outline::TocState::default(),
             selection: SelectionState::default(),
             find: find::FindState::default(),
+            missing: false,
+            pending_restore: None,
+            anchor: None,
         }
     }
 
@@ -129,6 +161,9 @@ impl Tab {
             toc: outline::TocState::default(),
             selection: SelectionState::default(),
             find: find::FindState::default(),
+            missing: false,
+            pending_restore: None,
+            anchor: None,
         }
     }
 
@@ -181,9 +216,8 @@ fn pump_rx(rx: &Receiver<ParseMsg>, doc: &mut Doc) -> Pumped {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext, paths: Vec<PathBuf>) -> Self {
+    pub fn new(cc: &eframe::CreationContext, paths: Vec<PathBuf>, mut settings: SettingsData) -> Self {
         fonts::install(&cc.egui_ctx);
-        let settings = store::load();
         // Эффективная тема: настройка или системная; egui знает её с старта.
         let dark = effective_dark(&cc.egui_ctx, settings.theme);
         apply_theme(&cc.egui_ctx, settings.theme, dark);
@@ -192,37 +226,66 @@ impl App {
         crate::highlight::warm_up();
 
         let mut next_id = 0;
-        let mut paths = paths;
-        // Без аргументов — открываем demo.md для проверки (если найден).
-        if paths.is_empty() {
-            if let Some(demo) = find_demo_md() {
-                paths.push(demo);
-            }
-        }
-        let mut tabs: Vec<Tab> = paths
-            .into_iter()
-            .map(|p| {
-                let tab = Tab::load(next_id, p);
+        let mut tabs: Vec<Tab> = Vec::new();
+        let mut active = 0;
+        if !paths.is_empty() {
+            // Явные аргументы CLI: сессию не восстанавливаем.
+            for p in paths {
+                settings.session.push_recent(&p);
+                tabs.push(Tab::load(next_id, p));
                 next_id += 1;
-                tab
-            })
-            .collect();
+            }
+        } else if !settings.session.tabs.is_empty() {
+            // Сессия: вкладки прошлого запуска с позициями чтения; файлы,
+            // которых больше нет, пропускаем молча.
+            for ts in &settings.session.tabs {
+                let p = PathBuf::from(&ts.path);
+                if !p.is_file() {
+                    continue;
+                }
+                let mut tab = Tab::load(next_id, p);
+                tab.pending_restore = Some(nav::RestorePos {
+                    y: ts.y,
+                    block: ts.block,
+                    block_top: ts.block_top,
+                });
+                tab.anchor = ts.anchor.clone();
+                tabs.push(tab);
+                next_id += 1;
+            }
+            active = settings.session.active.min(tabs.len().saturating_sub(1));
+        } else if let Some(demo) = find_demo_md() {
+            // Без аргументов и сессии — demo.md для проверки (если найден).
+            settings.session.push_recent(&demo);
+            tabs.push(Tab::load(next_id, demo));
+            next_id += 1;
+        }
         if tabs.is_empty() {
             tabs.push(Tab::welcome(next_id));
+            next_id += 1;
         }
 
-        Self {
+        let mut app = Self {
             tabs,
-            active: 0,
+            active,
             applied_theme: settings.theme,
+            egui_ctx: cc.egui_ctx.clone(),
+            watcher: watcher::Watcher::new(),
             settings,
             dark,
             show_settings: false,
             ctx_menu: None,
+            tab_menu: None,
             next_tab_id: next_id + 1,
             title_sent: String::new(),
             save_after: None,
+        };
+        // Синхронно готовые вкладки: вооружить восстановление позиций.
+        let ctx = app.egui_ctx.clone();
+        for i in 0..app.tabs.len() {
+            app.arm_restore(&ctx, i);
         }
+        app
     }
 
     fn pal(&self) -> &'static themes::Palette {
@@ -245,8 +308,9 @@ impl App {
     /// Прокачивает фоновые загрузки всех вкладок; true — пока есть живые.
     fn pump_tabs(&mut self, ctx: &Context) -> bool {
         let mut loading = false;
-        for tab in &mut self.tabs {
-            let mut finished: Option<TabState> = None;
+        let mut finished: Vec<(usize, TabState)> = Vec::new();
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            let mut done: Option<TabState> = None;
             if let TabState::Loading { doc, rx } = &mut tab.state {
                 match pump_rx(rx, doc) {
                     Pumped::Still => loading = true,
@@ -261,19 +325,204 @@ impl App {
                         doc.line_count = line_count;
                         doc.source = source;
                         let full = std::mem::replace(doc, Doc::empty());
-                        finished = Some(TabState::Ready(Arc::new(full)));
+                        done = Some(TabState::Ready(Arc::new(full)));
                     }
-                    Pumped::Failed(e) => finished = Some(TabState::Error(e)),
+                    Pumped::Failed(e) => done = Some(TabState::Error(e)),
                 }
             }
-            if let Some(state) = finished {
-                tab.state = state;
+            if let Some(state) = done {
+                finished.push((i, state));
             }
+        }
+        for (i, state) in finished {
+            self.tabs[i].state = state;
+            // Позиция чтения фоново загруженной вкладки — после раскладки.
+            self.arm_restore(ctx, i);
         }
         if loading {
             ctx.request_repaint();
         }
         loading
+    }
+
+    /// Слежение за файлами вкладок: набор путей, события с дебаунсом 300 мс →
+    /// перечитать изменившиеся, пропавшие — баннер «файл недоступен».
+    fn pump_watcher(&mut self, ctx: &Context) {
+        let files: Vec<PathBuf> = self.tabs.iter().filter_map(|t| t.path.clone()).collect();
+        self.watcher.set_files(&files);
+        let (events, until) = self.watcher.pump(Instant::now());
+        for ev in events {
+            match ev {
+                FileEvent::Changed(p) => {
+                    for i in 0..self.tabs.len() {
+                        if paths_eq(self.tabs[i].path.as_deref(), Some(&p)) {
+                            self.reload_tab(ctx, i);
+                        }
+                    }
+                }
+                FileEvent::Gone(p) => {
+                    let mut hit = false;
+                    for tab in &mut self.tabs {
+                        if paths_eq(tab.path.as_deref(), Some(&p)) && !tab.missing {
+                            tab.missing = true;
+                            hit = true;
+                        }
+                    }
+                    if hit {
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        }
+        if let Some(d) = until {
+            ctx.request_repaint_after(d);
+        }
+    }
+
+    /// Перечитывает файл вкладки (watcher), сохраняя позицию чтения по якорю
+    /// ближайшего блока: префикс текста первого видимого блока ищется в новом
+    /// документе (индексы блоков при перечитывании плывут). Выделение и
+    /// поиск сбрасываются — их координаты относились к старому документу.
+    fn reload_tab(&mut self, ctx: &Context, idx: usize) {
+        let Some(tab) = self.tabs.get(idx) else { return };
+        let Some(path) = tab.path.clone() else { return };
+        let (pos, anchor) = match nav::metrics(ctx, tab.id) {
+            Some(m) => {
+                let i0 = tab
+                    .layout
+                    .visible_range((m.offset - doc_view::TOP_PAD).max(0.0), m.offset + m.viewport_h)
+                    .start;
+                let anchor = state_doc(&tab.state).and_then(|doc| blocks::text_prefix(doc, i0));
+                let pos = nav::RestorePos {
+                    y: m.offset,
+                    block: i0,
+                    block_top: doc_view::TOP_PAD + tab.layout.offset(i0),
+                };
+                (Some(pos), anchor)
+            }
+            None => (None, None),
+        };
+        let id = tab.id;
+        let mut fresh = Tab::load(id, path);
+        fresh.pending_restore = pos;
+        fresh.anchor = anchor;
+        self.tabs[idx] = fresh;
+        self.arm_restore(ctx, idx);
+    }
+
+    /// Применяет отложенное восстановление позиции вкладки: готовый документ —
+    /// сразу (doc_view применит при готовой раскладке), фоновый — по готовности
+    /// (pump_tabs). Якорь блока сверяется с новым документом по префиксу.
+    fn arm_restore(&mut self, ctx: &Context, idx: usize) {
+        let Some(tab) = self.tabs.get_mut(idx) else { return };
+        if !matches!(tab.state, TabState::Ready(_)) {
+            return; // ещё грузится — позовут при Done
+        }
+        let Some(mut pos) = tab.pending_restore.take() else {
+            return;
+        };
+        if let Some(a) = tab.anchor.as_deref()
+            && let Some(doc) = state_doc(&tab.state)
+            && let Some(i) = blocks::find_by_prefix(doc, a)
+        {
+            pos.block = i;
+        }
+        nav::set_restore(ctx, tab.id, pos);
+    }
+
+    /// Снимок сессии: вкладки с позициями чтения (оффсет + якорь блока),
+    /// последние файлы, геометрия окна. Вкладки без метрик прокрутки (ещё не
+    /// показывались в этом запуске) сохраняют прошлое значение позиции.
+    fn session_snapshot(&self) -> SessionData {
+        let old: HashMap<&str, &TabSession> = self
+            .settings
+            .session
+            .tabs
+            .iter()
+            .map(|t| (t.path.as_str(), t))
+            .collect();
+        let mut tabs = Vec::new();
+        for tab in &self.tabs {
+            let Some(path) = tab.path.as_ref() else { continue };
+            if matches!(tab.state, TabState::Error(_)) {
+                continue; // нечитаемый файл — вкладку не сохраняем
+            }
+            let ps = path.display().to_string();
+            let entry = match nav::metrics(&self.egui_ctx, tab.id) {
+                Some(m) => {
+                    let i0 = tab
+                        .layout
+                        .visible_range(
+                            (m.offset - doc_view::TOP_PAD).max(0.0),
+                            m.offset + m.viewport_h,
+                        )
+                        .start;
+                    TabSession {
+                        path: ps.clone(),
+                        y: m.offset,
+                        block: i0,
+                        block_top: doc_view::TOP_PAD + tab.layout.offset(i0),
+                        anchor: state_doc(&tab.state)
+                            .and_then(|doc| blocks::text_prefix(doc, i0)),
+                    }
+                }
+                None => old.get(ps.as_str()).map(|t| (*t).clone()).unwrap_or(TabSession {
+                    path: ps.clone(),
+                    y: 0.0,
+                    block: 0,
+                    block_top: doc_view::TOP_PAD,
+                    anchor: None,
+                }),
+            };
+            tabs.push(entry);
+        }
+        let active = self.active.min(tabs.len().saturating_sub(1));
+
+        // Геометрия окна: позиция и размер — только в нормальном состоянии
+        // (развёрнутый прямоугольник не сохраняем); поинты, координаты
+        // монитора egui.
+        let (inner, maximized) = self
+            .egui_ctx
+            .input(|i| (i.viewport().inner_rect, i.viewport().maximized));
+        let (mut win_pos, mut win_size) =
+            (self.settings.session.win_pos, self.settings.session.win_size);
+        let mut win_max = self.settings.session.win_maximized;
+        if maximized == Some(true) {
+            win_max = true;
+        } else if let Some(r) = inner {
+            win_max = false;
+            win_pos = Some([r.min.x.round() as i32, r.min.y.round() as i32]);
+            win_size = Some([r.width().round(), r.height().round()]);
+        }
+
+        SessionData {
+            tabs,
+            active,
+            recent: self.settings.session.recent.clone(),
+            win_pos,
+            win_size,
+            win_maximized: win_max,
+        }
+    }
+
+    /// Немедленная запись сессии (выход из приложения, «Перезапуск»).
+    fn persist_session(&self) {
+        let mut data = self.settings.clone();
+        data.session = self.session_snapshot();
+        if let Err(e) = store::save(&data) {
+            log::warn!("settings.json: {e}");
+        }
+    }
+
+    /// Перезапуск: сохраняем сессию и стартуем новый процесс без аргументов —
+    /// он восстановит вкладки и позиции (например, A/B шрифтов владельцем).
+    fn restart(&self) -> ! {
+        self.persist_session();
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("DarkTechMD.exe"));
+        if let Err(e) = std::process::Command::new(exe).spawn() {
+            log::warn!("перезапуск не удался: {e}");
+        }
+        std::process::exit(0);
     }
 
     /// Документ активной вкладки: готовый или ещё стримящийся (для панелей
@@ -383,6 +632,7 @@ impl App {
     /// Открывает файл новой вкладкой (или заменяет единственную welcome-вкладку).
     fn open(&mut self, path: PathBuf) {
         let replace_welcome = self.tabs.len() == 1 && self.tabs[0].path.is_none();
+        self.settings.session.push_recent(&path);
         let tab = Tab::load(self.next_tab_id, path);
         self.next_tab_id += 1;
         let has_content = !matches!(tab.state, TabState::Welcome);
@@ -529,6 +779,105 @@ impl App {
         self.ctx_menu = Some(menu); // живём дальше
     }
 
+    /// Контекст-меню вкладки (правый клик по имени файла в таб-баре):
+    /// «Показать в проводнике» / «Сохранить как…» (копия в другое место).
+    fn show_tab_menu(&mut self, ctx: &Context) {
+        let Some(menu) = self.tab_menu.take() else { return };
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            return; // закрыть, не возвращая
+        }
+
+        let pal = self.pal();
+        let lang = self.lang();
+        let em = self.settings.ui_font_size as f32;
+
+        // Вкладка могла закрыться, пока меню открыто.
+        let Some(tab) = self.tabs.get(menu.idx) else { return };
+        let Some(path) = tab.path.clone() else { return };
+        let file_ok = path.is_file();
+        let dir_ok = path.parent().is_some_and(|d| d.is_dir());
+        let can_save = file_ok || state_doc(&tab.state).is_some();
+        // заимствование tab заканчивается здесь (NLL)
+
+        let mut items: Vec<(&str, bool, TabCtxAction)> = vec![
+            (t(lang, "tm_explorer"), file_ok || dir_ok, TabCtxAction::Explorer),
+            (t(lang, "tm_save_as"), can_save, TabCtxAction::SaveAs),
+        ];
+
+        // Не вылезать за края экрана (как у меню документа).
+        let screen = ctx.viewport_rect();
+        let w = 240.0 * self.ui_scale();
+        let h = items.len() as f32 * (em * 1.7) + 10.0;
+        let pos = pos2(
+            menu.pos.x.min(screen.max.x - w - 6.0).max(screen.min.x + 4.0),
+            menu.pos.y.min(screen.max.y - h - 6.0).max(screen.min.y + 4.0),
+        );
+
+        let mut clicked: Option<usize> = None;
+        let resp = eframe::egui::Area::new(eframe::egui::Id::unique("tab_menu"))
+            .order(eframe::egui::Order::Foreground)
+            .fixed_pos(pos)
+            .interactable(true)
+            .show(ctx, |ui| {
+                let frame = eframe::egui::Frame::NONE
+                    .fill(pal.code_bg)
+                    .stroke(egui::Stroke::new(1.0, pal.border))
+                    .inner_margin(egui::Margin::same(4));
+                frame.show(ui, |ui| {
+                    ui.set_min_width(w - 8.0);
+                    ui.vertical(|ui| {
+                        for (i, (label, enabled, _)) in items.iter().enumerate() {
+                            if ctx_menu_item(ui, ("tab_menu_item", i), label, *enabled, em, pal)
+                                && clicked.is_none()
+                            {
+                                clicked = Some(i);
+                            }
+                        }
+                    });
+                });
+            })
+            .response;
+
+        if let Some(i) = clicked {
+            match items.swap_remove(i).2 {
+                TabCtxAction::Explorer => show_in_explorer(&path),
+                TabCtxAction::SaveAs => self.save_copy_as(menu.idx),
+            }
+            return; // действие закрывает меню
+        }
+        if resp.clicked_elsewhere() {
+            return; // клик мимо — закрыть
+        }
+        self.tab_menu = Some(menu); // живём дальше
+    }
+
+    /// «Сохранить как…»: точная побайтовая копия файла; файла уже нет —
+    /// пишем последний прочитанный текст вкладки.
+    fn save_copy_as(&self, idx: usize) {
+        let Some(tab) = self.tabs.get(idx) else { return };
+        let Some(path) = tab.path.as_ref() else { return };
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "document.md".to_string());
+        let Some(dst) = rfd::FileDialog::new()
+            .add_filter("Markdown", &["md", "markdown", "mdown"])
+            .set_file_name(&name)
+            .save_file()
+        else {
+            return;
+        };
+        if path.is_file() {
+            if let Err(e) = std::fs::copy(path, &dst) {
+                log::warn!("копия не записана: {e}");
+            }
+        } else if let Some(doc) = state_doc(&tab.state) {
+            if let Err(e) = std::fs::write(&dst, doc.source.as_ref()) {
+                log::warn!("копия не записана: {e}");
+            }
+        }
+    }
+
     fn handle_input(&mut self, ctx: &Context) {
         // Ctrl+O — диалог выбора файла.
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::O)) {
@@ -565,6 +914,7 @@ impl App {
             tab.find.close();
         } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.ctx_menu = None;
+            self.tab_menu = None;
             if let Some(tab) = self.tabs.get_mut(self.active) {
                 tab.selection.clear();
             }
@@ -791,18 +1141,57 @@ fn request_scroll_to_hit(
     nav::request_scroll(ctx, tab_id, nav::ScrollRequest::Y((y - vh * 0.35).max(0.0)));
 }
 
-/// Перезапуск приложения: новый процесс с путями открытых вкладок (для
-/// тестирования владельцем — например, сравнение качества шрифтов).
-fn restart_app(tabs: &[Tab]) -> ! {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("DarkTechMD.exe"));
-    let args: Vec<String> = tabs
-        .iter()
-        .filter_map(|t| t.path.as_ref().map(|p| p.display().to_string()))
-        .collect();
-    if let Err(e) = std::process::Command::new(exe).args(args).spawn() {
-        log::warn!("перезапуск не удался: {e}");
+/// Пути указывают на один файл (Windows: без учёта регистра).
+fn paths_eq(a: Option<&Path>, b: Option<&Path>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => path_str_eq(a, b),
+        _ => false,
     }
-    std::process::exit(0);
+}
+
+#[cfg(windows)]
+fn path_str_eq(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+}
+
+#[cfg(not(windows))]
+fn path_str_eq(a: &Path, b: &Path) -> bool {
+    a == b
+}
+
+/// Полоса «файл недоступен» над документом (файл удалён/переименован):
+/// содержимое остаётся читаемым; при появлении файла watcher перечитает.
+fn missing_banner(ui: &mut Ui, path: &Option<PathBuf>, pal: &themes::Palette, lang: Lang, em: f32) {
+    let h = (em * 2.1).max(30.0);
+    let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
+    let painter = ui.painter().clone();
+    painter.rect_filled(r, egui::CornerRadius::same(0), pal.code_bg);
+    painter.line_segment(
+        [pos2(r.min.x, r.max.y - 0.5), pos2(r.max.x, r.max.y - 0.5)],
+        egui::Stroke::new(1.0, pal.border),
+    );
+    painter.rect_filled(
+        Rect::from_min_size(r.min, vec2(3.0, r.height())),
+        egui::CornerRadius::same(0),
+        pal.alert_caution,
+    );
+    let msg = title_galley(ui, t(lang, "err_file_gone"), em, pal.alert_caution, true);
+    let path = path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let pg = if path.is_empty() {
+        None
+    } else {
+        Some(title_galley(ui, &path, em * 0.9, pal.muted, false))
+    };
+    let cy = r.center().y;
+    let mut x = r.min.x + 14.0;
+    painter.galley(pos2(x, cy - msg.size().y * 0.5), msg.clone(), pal.alert_caution);
+    x += msg.size().x + 12.0;
+    if let Some(pg) = pg {
+        painter.galley_with_override_text_color(pos2(x, cy - pg.size().y * 0.5), pg, pal.muted);
+    }
 }
 
 /// Эффективная тёмная тема: System — по данным ОС (пока неизвестно → тёмная).
@@ -839,6 +1228,24 @@ fn pick_md_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
         .add_filter("Markdown", &["md", "markdown", "mdown"])
         .pick_file()
+}
+
+/// Проводник: выделить файл (файла нет — открыть его каталог).
+fn show_in_explorer(path: &Path) {
+    let spawned = if path.is_file() {
+        std::process::Command::new("explorer")
+            .arg("/select,")
+            .arg(path)
+            .spawn()
+            .is_ok()
+    } else if let Some(dir) = path.parent().filter(|d| d.is_dir()) {
+        std::process::Command::new("explorer").arg(dir).spawn().is_ok()
+    } else {
+        false
+    };
+    if !spawned {
+        log::warn!("проводник не открылся: {}", path.display());
+    }
 }
 
 /// demo.md «на все элементы» для проверки без аргументов CLI.
@@ -878,6 +1285,7 @@ impl eframe::App for App {
         self.handle_input(&ctx);
         self.pump_tabs(&ctx);
         self.pump_find(&ctx);
+        self.pump_watcher(&ctx);
 
         egui::Panel::top("tab_strip")
             .resizable(false)
@@ -912,7 +1320,7 @@ impl eframe::App for App {
                     );
                 });
             if restart {
-                restart_app(&self.tabs);
+                self.restart();
             }
         }
 
@@ -1006,7 +1414,24 @@ impl eframe::App for App {
         };
 
         let mut doc_events: Vec<doc_view::DocEvent> = Vec::new();
-        let mut welcome_clicked = false;
+        let mut welcome_action: Option<welcome::Action> = None;
+        // Последние файлы для welcome-экрана (существующие, до 8 строк).
+        let recent: Vec<PathBuf> = if self
+            .tabs
+            .get(self.active)
+            .is_some_and(|t| matches!(t.state, TabState::Welcome))
+        {
+            self.settings
+                .session
+                .recent
+                .iter()
+                .map(PathBuf::from)
+                .filter(|p| p.is_file())
+                .take(8)
+                .collect()
+        } else {
+            Vec::new()
+        };
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(pal.bg))
             .show(ui, |ui| {
@@ -1018,6 +1443,7 @@ impl eframe::App for App {
                     state,
                     layout,
                     path,
+                    missing,
                     selection,
                     find,
                     ..
@@ -1027,9 +1453,12 @@ impl eframe::App for App {
                         show_error(ui, path, err, env.lang, ui_em);
                     }
                     TabState::Welcome => {
-                        welcome_clicked = welcome::show(ui, env.lang, pal, ui_em);
+                        welcome_action = welcome::show(ui, env.lang, pal, ui_em, &recent);
                     }
                     TabState::Loading { doc, .. } => {
+                        if *missing {
+                            missing_banner(ui, path, pal, env.lang, ui_em);
+                        }
                         if doc.blocks.is_empty() {
                             show_loading(ui, env.lang, ui_em);
                         } else {
@@ -1037,6 +1466,9 @@ impl eframe::App for App {
                         }
                     }
                     TabState::Ready(arc) => {
+                        if *missing {
+                            missing_banner(ui, path, pal, env.lang, ui_em);
+                        }
                         doc_events.extend(doc_view::show(ui, arc, layout, &env, *id, selection, find));
                     }
                 }
@@ -1045,19 +1477,27 @@ impl eframe::App for App {
             match ev {
                 doc_view::DocEvent::OpenLink(url) => self.open_link(&url, &ctx),
                 doc_view::DocEvent::ContextMenu { pos, link } => {
+                    self.tab_menu = None;
                     self.ctx_menu = Some(CtxMenu { pos, link });
                     ctx.request_repaint();
                 }
             }
         }
-        if welcome_clicked {
-            if let Some(path) = pick_md_file() {
-                self.open(path);
+        match welcome_action {
+            Some(welcome::Action::Dialog) => {
+                if let Some(path) = pick_md_file() {
+                    self.open(path);
+                }
             }
+            Some(welcome::Action::Recent(path)) => self.open(path),
+            None => {}
         }
 
         // Контекст-меню — поверх всего, после центральной панели.
         self.show_context_menu(&ctx);
+
+        // Меню вкладки (правый клик по имени файла в таб-баре).
+        self.show_tab_menu(&ctx);
 
         // Попап поиска активной вкладки (Ctrl+F) — плавающий, поверх документа.
         if self.tabs.get(self.active).is_some_and(|t| {
@@ -1077,6 +1517,13 @@ impl eframe::App for App {
                 }
                 None => {}
             }
+        }
+
+        // Сессия (вкладки/позиции чтения/геометрия окна) — тем же дебаунсом,
+        // что и настройки: снимок каждого кадра, запись при изменении.
+        let snap = self.session_snapshot();
+        if snap != self.settings.session {
+            self.settings.session = snap;
         }
 
         // Настройки изменились → нормализуем и запишем в settings.json
@@ -1101,6 +1548,12 @@ impl eframe::App for App {
 
         self.sync_title(&ctx);
     }
+
+    /// Выход из приложения: сессия обязана попасть на диск синхронно —
+    /// дебаунс сохранения мог не успеть сработать до закрытия окна.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.persist_session();
+    }
 }
 
 /// Действия из таб-бара (применяются после отрисовки, чтобы не мучиться с заимствованиями).
@@ -1109,6 +1562,8 @@ enum TabAction {
     Close(usize),
     NewTab,
     ToggleSettings,
+    /// Правый клик по вкладке: контекст-меню в позиции курсора.
+    TabMenu { pos: Pos2, idx: usize },
 }
 
 /// Плоские вкладки без скруглений: активная подсвечена заливкой фона читалки.
@@ -1209,6 +1664,12 @@ fn tab_strip(ui: &mut Ui, app: &mut App) {
             } else if resp.clicked() {
                 actions.push(TabAction::Select(i));
             }
+            // Правый клик по вкладке — контекст-меню файла (проводник/копия).
+            if (resp.secondary_clicked() || x_resp.secondary_clicked())
+                && let Some(p) = ui.input(|i| i.pointer.interact_pos())
+            {
+                actions.push(TabAction::TabMenu { pos: p, idx: i });
+            }
         }
 
         // Правый край полосы: стрелки переключения вкладок + настройки.
@@ -1268,6 +1729,10 @@ fn tab_strip(ui: &mut Ui, app: &mut App) {
                 }
             }
             TabAction::ToggleSettings => app.show_settings = !app.show_settings,
+            TabAction::TabMenu { pos, idx } => {
+                app.ctx_menu = None; // открыто одно меню
+                app.tab_menu = Some(TabMenu { pos, idx });
+            }
         }
     }
 }

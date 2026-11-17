@@ -59,9 +59,10 @@ pub fn show(
     let scroll_id = ui.scope_id().with(("doc_scroll", tab_key));
     let fab_id = ui.scope_id().with(("fab_top", tab_key));
 
-    // Принудительный оффсет этого кадра: просьба «наверх», навигация
-    // (оглавление/миникарта/якорь), автоскролл или компенсация «прилипания»
-    // (высоты выше вьюпорта изменились).
+    // Принудительный оффсет этого кадра: восстановление сохранённой позиции
+    // (сессия/перезагрузка файла — приоритетнее прочих просьб кадра),
+    // «наверх», навигация (оглавление/миникарта/якорь), автоскролл или
+    // компенсация «прилипания» (высоты выше вьюпорта изменились).
     let mut forced: Option<f32> = None;
     let to_top = ui.ctx().data_mut(|d| {
         let v = d.get_temp::<bool>(fab_id).unwrap_or(false);
@@ -72,7 +73,15 @@ pub fn show(
     });
     let nav_req = nav::take_request(ui.ctx(), tab_key);
     let as_off = nav::take_autoscroll_offset(ui.ctx(), tab_key);
-    if to_top {
+    // Восстановление применяем, только когда раскладка готова (первый ensure
+    // дал оценки высот): в кадре ожидания документ не рисуем (см. ниже) —
+    // иначе мелькнул бы «топ» перед прыжком на сохранённую позицию.
+    let restoring = nav::peek_restore(ui.ctx(), tab_key);
+    if let Some(r) = restoring.filter(|_| layout.is_ready()) {
+        let block = r.block.min(layout.blocks_len().saturating_sub(1));
+        forced = Some((TOP_PAD + layout.offset(block) + (r.y - r.block_top)).max(0.0));
+        nav::clear_restore(ui.ctx(), tab_key);
+    } else if to_top {
         forced = Some(0.0);
         nav::stop_autoscroll(ui.ctx(), tab_key);
     } else if let Some(req) = nav_req {
@@ -130,6 +139,14 @@ pub fn show(
         // origin = экранная позиция контента (0,0); viewport — координаты контента.
         let origin = ui.cursor().min;
         ui.set_min_height(TOP_PAD + layout.total_height() + BOTTOM_PAD);
+
+        if restoring.is_some() && !layout.is_ready() {
+            // Кадр-ожидание восстановления: ensure только что обеспечил
+            // раскладку, позицию применит следующий кадр (forced). Контент
+            // не рисуем — так восстановление происходит без видимого прыжка.
+            ui.ctx().request_repaint();
+            return;
+        }
 
         let side = ((avail - col) / 2.0).max(0.0).floor();
         let x0 = origin.x + side;

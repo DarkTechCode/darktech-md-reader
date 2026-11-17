@@ -34,6 +34,12 @@ serde = { version = "1", features = ["derive"] }
 # Поиск по документу: SIMD-поиск подстроки (memmem) в фоновой нити.
 memchr = "2"
 serde_json = "1"
+# Слежение за файлами вкладок: перечитать при изменении (дебаунс 300 мс).
+notify = "8"
+
+[target.'cfg(windows)'.dependencies]
+# Проверка, что сохранённая позиция окна попадает на существующий монитор.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_HiDpi"] }
 # Подсветка кода (только видимые строки; fancy-regex — чистый Rust, без onig).
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 

@@ -1,6 +1,8 @@
 //! Модель настроек (структура settings.json) и нормализация значений —
 //! диапазоны и шаги из плана §4.9 (набор опций MarkMello).
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use crate::i18n::{self, Lang};
@@ -32,6 +34,10 @@ pub const TOC_WIDTH_DEFAULT: f32 = 260.0;
 pub const TOC_WIDTH_RANGE: (f32, f32) = (180.0, 560.0);
 pub const MM_WIDTH_DEFAULT: f32 = 152.0;
 pub const MM_WIDTH_RANGE: (f32, f32) = (64.0, 400.0);
+/// Сколько последних файлов помним на welcome-экране.
+pub const RECENT_MAX: usize = 10;
+/// Максимум вкладок в сохраняемой сессии.
+pub const SESSION_TABS_MAX: usize = 32;
 
 /// Тема интерфейса.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +72,66 @@ pub enum PanelMode {
 pub enum Side {
     Left,
     Right,
+}
+
+/// Сессия приложения (часть settings.json): вкладки с позициями чтения,
+/// последние файлы (welcome-экран) и геометрия окна. Восстанавливается при
+/// запуске без аргументов CLI.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SessionData {
+    /// Открытые вкладки (файлы, которые ещё существуют, открываются снова).
+    pub tabs: Vec<TabSession>,
+    /// Индекс активной вкладки.
+    pub active: usize,
+    /// Последние открытые файлы: путь — вниз списком welcome-экрана.
+    pub recent: Vec<String>,
+    /// Позиция окна, поинты (координаты монитора egui). None — не сохранена.
+    pub win_pos: Option<[i32; 2]>,
+    /// Нормальный (не развёрнутый) размер окна, поинты.
+    pub win_size: Option<[f32; 2]>,
+    /// Окно развёрнуто.
+    pub win_maximized: bool,
+}
+
+/// Позиция чтения одной вкладки сессии: оффсет скролла + якорь первого
+/// видимого блока. Индекс блока устаревает при изменении файла — сверька
+/// по текстовому префиксу `anchor`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TabSession {
+    /// Путь к файлу (display-строка; нелатинские пути поддерживаются).
+    pub path: String,
+    /// Оффсет скролла, px (координаты контента).
+    pub y: f32,
+    /// Первый видимый блок (якорь восстановления).
+    pub block: usize,
+    /// Верх якорного блока в координатах скролла на момент сохранения, px.
+    pub block_top: f32,
+    /// Префикс текста якорного блока (свежий снимок каждого кадра).
+    pub anchor: Option<String>,
+}
+
+impl SessionData {
+    /// Запомнить открытый файл: в начало списка, без дублей, с потолком.
+    pub fn push_recent(&mut self, path: &Path) {
+        let key = path_key(path);
+        self.recent
+            .retain(|r| path_key(Path::new(r)) != key);
+        self.recent.insert(0, path.display().to_string());
+        self.recent.truncate(RECENT_MAX);
+    }
+}
+
+/// Ключ дедупликации путей (Windows: без учёта регистра).
+#[cfg(windows)]
+fn path_key(p: &Path) -> String {
+    p.to_string_lossy().to_lowercase()
+}
+
+#[cfg(not(windows))]
+fn path_key(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
 }
 
 /// Все настройки приложения. Дефолты — план §4.9; шрифт по умолчанию Sans —
@@ -109,6 +175,8 @@ pub struct SettingsData {
     pub toc_width: f32,
     /// Ширина миникарты, px.
     pub minimap_width: f32,
+    /// Сессия: вкладки с позициями, последние файлы, геометрия окна.
+    pub session: SessionData,
 }
 
 impl Default for SettingsData {
@@ -133,6 +201,7 @@ impl Default for SettingsData {
             minimap_mode: PanelMode::Auto,
             toc_width: TOC_WIDTH_DEFAULT,
             minimap_width: MM_WIDTH_DEFAULT,
+            session: SessionData::default(),
         }
     }
 }
@@ -163,6 +232,16 @@ impl SettingsData {
         self.minimap_width = self
             .minimap_width
             .clamp(MM_WIDTH_RANGE.0, MM_WIDTH_RANGE.1);
+        // Сессия: потолки списков и разумные диапазоны позиции.
+        self.session.tabs.truncate(SESSION_TABS_MAX);
+        self.session.active = self
+            .session
+            .active
+            .min(self.session.tabs.len().saturating_sub(1));
+        for t in &mut self.session.tabs {
+            t.y = t.y.max(0.0);
+        }
+        self.session.recent.truncate(RECENT_MAX);
     }
 
     /// Типографика документа из настроек (для Env и LayoutKey).
@@ -302,5 +381,78 @@ mod tests {
         assert!((typo.line_height - 1.9).abs() < 1e-6);
         assert_eq!(typo.width, 640.0);
         assert!((typo.letter_spacing - 1.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn session_json_roundtrip() {
+        let d = SettingsData {
+            session: SessionData {
+                tabs: vec![TabSession {
+                    path: "D:/док/заметки.md".into(),
+                    y: 4310.5,
+                    block: 87,
+                    block_top: 4290.0,
+                    anchor: Some("Якорь видимого блока".into()),
+                }],
+                active: 0,
+                recent: vec!["D:/док/заметки.md".into(), "C:/temp/demo.md".into()],
+                win_pos: Some([-8, 31]),
+                win_size: Some([1100.0, 760.0]),
+                win_maximized: true,
+            },
+            ..Default::default()
+        };
+        let js = serde_json::to_string(&d).unwrap();
+        assert!(js.contains(r#""tabs":[{"path":"D:/док/заметки.md","y":4310.5,"block":87,"blockTop":4290.0,"anchor":"Якорь видимого блока"}]"#));
+        assert!(js.contains(r#""recent":["D:/док/заметки.md","C:/temp/demo.md"]"#));
+        assert!(js.contains(r#""winPos":[-8,31]"#));
+        assert!(js.contains(r#""winSize":[1100.0,760.0]"#));
+        assert!(js.contains(r#""winMaximized":true"#));
+        assert_eq!(serde_json::from_str::<SettingsData>(&js).unwrap(), d);
+    }
+
+    #[test]
+    fn session_defaults_when_missing_and_normalize_caps() {
+        let d: SettingsData = serde_json::from_str(r#"{"fontSize":20}"#).unwrap();
+        assert!(d.session.tabs.is_empty());
+        assert!(d.session.recent.is_empty());
+        assert!(!d.session.win_maximized);
+
+        let mut d = SettingsData {
+            session: SessionData {
+                tabs: (0..40)
+                    .map(|i| TabSession {
+                        path: format!("f{i}.md"),
+                        y: -5.0,
+                        ..Default::default()
+                    })
+                    .collect(),
+                active: 39,
+                recent: (0..20).map(|i| format!("r{i}.md")).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        d.normalize();
+        assert_eq!(d.session.tabs.len(), SESSION_TABS_MAX);
+        assert_eq!(d.session.active, SESSION_TABS_MAX - 1);
+        assert!(d.session.tabs.iter().all(|t| t.y >= 0.0));
+        assert_eq!(d.session.recent.len(), RECENT_MAX);
+    }
+
+    #[test]
+    fn push_recent_dedup_and_cap() {
+        let mut s = SessionData::default();
+        for i in 0..RECENT_MAX + 2 {
+            s.push_recent(Path::new(&format!("C:/temp/{i}.md")));
+        }
+        assert_eq!(s.recent.len(), RECENT_MAX);
+        assert_eq!(s.recent[0], "C:/temp/11.md");
+
+        // Повторное открытие поднимает наверх без дублей (регистр не важен).
+        s.push_recent(Path::new("c:/TEMP/0.md"));
+        assert_eq!(s.recent.len(), RECENT_MAX);
+        assert_eq!(s.recent[0], "c:/TEMP/0.md");
+        assert_eq!(s.recent.iter().filter(|r| *r == "C:/temp/0.md").count(), 0);
     }
 }

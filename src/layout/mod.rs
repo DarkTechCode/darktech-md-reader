@@ -111,6 +111,12 @@ impl LayoutState {
         self.version
     }
 
+    /// Был ли хотя бы один ensure (ключ раскладки установлен): высоты
+    /// существуют хотя бы как оценки. Нужно восстановлению позиции.
+    pub fn is_ready(&self) -> bool {
+        self.key.is_some()
+    }
+
     pub fn height(&self, i: usize) -> f32 {
         self.heights[i.min(self.heights.len().saturating_sub(1))]
     }

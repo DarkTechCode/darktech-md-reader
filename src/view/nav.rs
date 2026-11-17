@@ -37,6 +37,33 @@ pub enum ScrollRequest {
     Y(f32),
 }
 
+/// Сохранённая позиция чтения (сессия или перезагрузка файла): оффсет
+/// скролла + якорь — первый видимый блок и его верх в координатах скролла
+/// на момент сохранения. doc_view применяет её, когда раскладка готова
+/// (первый ensure дал оценки высот): цель = TOP_PAD + верх якоря в НОВОЙ
+/// раскладке + смещение внутри блока (y − block_top).
+#[derive(Clone, Copy, Debug)]
+pub struct RestorePos {
+    pub y: f32,
+    pub block: usize,
+    pub block_top: f32,
+}
+
+/// Отложить восстановление позиции вкладки (применяет doc_view).
+pub fn set_restore(ctx: &Context, tab: u64, pos: RestorePos) {
+    ctx.data_mut(|d| d.insert_temp(key(tab, "restore"), pos));
+    ctx.request_repaint();
+}
+
+/// Заглянуть в отложенное восстановление (не изымая).
+pub fn peek_restore(ctx: &Context, tab: u64) -> Option<RestorePos> {
+    ctx.data(|d| d.get_temp(key(tab, "restore")))
+}
+
+pub fn clear_restore(ctx: &Context, tab: u64) {
+    ctx.data_mut(|d| d.remove::<RestorePos>(key(tab, "restore")));
+}
+
 pub fn request_scroll(ctx: &Context, tab: u64, req: ScrollRequest) {
     ctx.data_mut(|d| d.insert_temp(key(tab, "scroll_req"), req));
     ctx.request_repaint();

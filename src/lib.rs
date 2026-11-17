@@ -7,5 +7,7 @@ pub mod highlight;
 pub mod i18n;
 pub mod layout;
 pub mod md;
+pub mod monitor;
 pub mod settings;
 pub mod view;
+pub mod watcher;

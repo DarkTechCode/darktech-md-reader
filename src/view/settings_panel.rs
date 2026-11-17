@@ -298,7 +298,11 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> boo
     ui.horizontal(|ui| {
         ui.add_space(PAD - 6.0);
         if flat_bordered_button(ui, t(lang, "st_reset"), em, pal) {
+            // Сбрасываем опции чтения; сессия (вкладки/последние файлы/
+            // геометрия окна) — не настройка чтения, её сохраняем.
+            let session = std::mem::take(&mut s.session);
             *s = SettingsData::default();
+            s.session = session;
         }
         ui.add_space(10.0);
         if flat_bordered_button(ui, t(lang, "st_restart"), em, pal) {

@@ -27,6 +27,9 @@ use crate::view::{doc_view, find, find_bar, minimap, nav, outline, settings_pane
 use crate::watcher::{self, FileEvent};
 use crate::fonts;
 use eframe::egui::Pos2;
+// HWND из eframe CreationContext (тема титульной строки через DWM).
+#[cfg(windows)]
+use raw_window_handle::HasWindowHandle;
 
 /// Задержка записи settings.json после последнего изменения (дебаунс слайдеров).
 const SAVE_DELAY: Duration = Duration::from_millis(400);
@@ -221,6 +224,15 @@ fn pump_rx(rx: &Receiver<ParseMsg>, doc: &mut Doc) -> Pumped {
 impl App {
     pub fn new(cc: &eframe::CreationContext, paths: Vec<PathBuf>, mut settings: SettingsData) -> Self {
         fonts::install(&cc.egui_ctx);
+        // HWND главного окна: титульная строка красится напрямую через DWM
+        // ещё ДО показа окна (eframe показывает его после первой покраски,
+        // а команды egui SetTheme применяются только ПОСЛЕ — см. titlebar).
+        #[cfg(windows)]
+        if let Ok(h) = cc.window_handle()
+            && let raw_window_handle::RawWindowHandle::Win32(w) = h.as_raw()
+        {
+            crate::titlebar::set_hwnd(w.hwnd.get());
+        }
         // Эффективная тема: настройка или системная; egui знает её с старта.
         let dark = effective_dark(&cc.egui_ctx, settings.theme);
         apply_theme(&cc.egui_ctx, settings.theme, dark);
@@ -1225,6 +1237,11 @@ fn apply_theme(ctx: &Context, mode: ThemeMode, dark: bool) {
     } else {
         egui::SystemTheme::Light
     }));
+    // Надёжнее команды egui: применяется мгновенно и до показа окна
+    // (wint красит устаревшим SetWindowCompositionAttribute — на новых
+    // билдах Windows игнорируется; см. titlebar.rs).
+    #[cfg(windows)]
+    crate::titlebar::set_dark(dark);
 }
 
 fn pick_text_file() -> Option<PathBuf> {
@@ -1286,9 +1303,10 @@ impl eframe::App for App {
             themes::apply(&ctx);
         }
 
-        // Окно стартует невидимым: теперь титульная строка окрашена нашей
-        // темой (SetTheme из App::new применён) — показываем. Повторная
-        // команда темы страхует от потери при холодном старте окна.
+        // Окно стартует невидимым: титульная строка уже окрашена нашей темой
+        // (DWM-атрибут из App::new + SetTheme из App::new применены) —
+        // показываем. Повторная команда темы страхует от потери при
+        // холодном старте окна.
         if self.first_frame {
             self.first_frame = false;
             ctx.send_viewport_cmd(ViewportCommand::SetTheme(if eff {

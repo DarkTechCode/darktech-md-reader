@@ -307,6 +307,12 @@ cargo run -- temp/demo.md                 # запуск с демо-файло�
   получает видимый вьюпорт скролла (`vis`), а не `ui.max_rect()` (контент
   всей высоты документа накрывал бар/таб-бар, клик по бару начинал
   выделение документа).
+- Раунд 33: белый ЗАГОЛОВОК ОКНА при тёмной программе на старте — src/titlebar.rs
+  красит титульную строку напрямую `DwmSetWindowAttribute(DWMWA_USE_
+  IMMERSIVE_DARK_MODE)` по HWND из `CreationContext.raw_window_handle`
+  (в App::new окно ещё скрыто — мигания нет); вызов и в apply_theme
+  (переключение темы красит заголовок гарантированно). Причины, почему
+  команды egui недостаточно — см. §4.
 
 
 - `src/settings/` — serde-модель (camelCase, `#[serde(default)]`, повреждённый →
@@ -589,6 +595,16 @@ assets/icon.ico        иконка exe (winres); генератор — assets/
 - Фоновая загрузка с заимствованием из source: `ParseMsg::Source` обязан
   приходить ПЕРВЫМ сообщением (до чанков) — блоки несут диапазоны в source,
   `.get(source)` на пустом источнике паникует по byte-границе.
+- ТЕМА ТИТУЛЬНОЙ СТРОКИ: `ViewportCommand::SetTheme` НЕ годится на старте:
+  (1) eframe показывает окно сам (post_rendering после первой покраски), а
+  команды вьюпорта обрабатываются ПОСЛЕ показа; (2) winit 0.30 красит через
+  устаревший SetWindowCompositionAttribute(WCA_USEDARKMODECOLORS) — на новых
+  билдах Win11 игнорируется. Решение: `DwmSetWindowAttribute(DWMWA_USE_
+  IMMERSIVE_DARK_MODE=20, фолбэк 19)` по HWND; HWND берём один раз в App::new
+  из `cc.window_handle()` (трейт HasWindowHandle, crate raw-window-handle 0.6;
+  Win32-вариант: `RawWindowHandle::Win32(w).hwnd.get()`); окно в этот момент
+  уже создано, но скрыто (eframe прячет до первой покраски — .with_visible(
+  false) в билдере дублирует встроенное поведение eframe).
 - `eframe::App::on_exit(&mut self, gl: Option<&glow::Context>)` —
   синхронное сохранение при закрытии окна (дебаунс записи мог не успеть).
   ctx в on_exit НЕ дают: храним `cc.egui_ctx.clone()` с App::new —

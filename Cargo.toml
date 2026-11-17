@@ -43,9 +43,11 @@ notify = "8"
 
 [target.'cfg(windows)'.dependencies]
 # Проверка, что сохранённая позиция окна попадает на существующий монитор;
-# perf-тест бюджета памяти (GetProcessMemoryInfo); ассоциация .md (HKCU).
+# perf-тест бюджета памяти (GetProcessMemoryInfo); ассоциация .md (HKCU);
+# тема титульной строки (DwmSetWindowAttribute по HWND из eframe).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_UI_HiDpi",
     "Win32_System_Registry",
@@ -53,6 +55,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_ProcessStatus",
     "Win32_UI_Shell",
 ] }
+raw-window-handle = "0.6"
 # Подсветка кода (только видимые строки; fancy-regex — чистый Rust, без onig).
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 

@@ -10,5 +10,7 @@ pub mod layout;
 pub mod md;
 pub mod monitor;
 pub mod settings;
+#[cfg(windows)]
+pub mod titlebar;
 pub mod view;
 pub mod watcher;

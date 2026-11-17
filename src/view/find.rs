@@ -290,9 +290,16 @@ fn search_doc(doc: &Doc, query: &str, mut on_hit: impl FnMut(Hit) -> bool) {
     };
     let finder = memmem::Finder::new(needle.as_bytes());
     let needle_ch = needle.chars().count();
+    let source = doc.source.as_ref();
     for (bi, block) in doc.blocks.iter().enumerate() {
-        search_block(block, bi, &finder, needle_ch, fold_case, &mut on_hit);
+        search_block(block, bi, &finder, needle_ch, fold_case, source, &mut on_hit);
     }
+}
+
+/// Синхронный поиск по всему документу (та же машина, что в фоновой нити) —
+/// для интеграционных тестов бюджета §7 (первый результат < 300 мс на 50 МБ).
+pub fn search_sync(doc: &Doc, query: &str, on_hit: impl FnMut(Hit) -> bool) {
+    search_doc(doc, query, on_hit);
 }
 
 /// Все под-области блока в порядке документа.
@@ -302,6 +309,7 @@ fn search_block(
     finder: &memmem::Finder,
     needle_ch: usize,
     fold_case: bool,
+    source: &str,
     on_hit: &mut impl FnMut(Hit) -> bool,
 ) {
     match block {
@@ -309,10 +317,10 @@ fn search_block(
         | BlockKind::Paragraph { spans }
         | BlockKind::Quote { spans, .. }
         | BlockKind::ListItem { spans, .. } => {
-            search_spans(bi, 0, spans, finder, needle_ch, fold_case, on_hit);
+            search_spans(bi, 0, spans, finder, needle_ch, fold_case, source, on_hit);
         }
         BlockKind::Code { code, .. } => {
-            search_text(bi, 0, code, finder, needle_ch, fold_case, on_hit);
+            search_text(bi, 0, code.get(source), finder, needle_ch, fold_case, on_hit);
         }
         BlockKind::Table { aligns, rows } => {
             let ncols = aligns.len().max(1);
@@ -325,6 +333,7 @@ fn search_block(
                         finder,
                         needle_ch,
                         fold_case,
+                        source,
                         on_hit,
                     );
                 }
@@ -342,15 +351,24 @@ fn search_spans(
     finder: &memmem::Finder,
     needle_ch: usize,
     fold_case: bool,
+    source: &str,
     on_hit: &mut impl FnMut(Hit) -> bool,
 ) {
     if !fold_case && spans.len() == 1 {
-        search_text(bi, sub, &spans[0].text, finder, needle_ch, fold_case, on_hit);
+        search_text(
+            bi,
+            sub,
+            spans[0].text.get(source),
+            finder,
+            needle_ch,
+            fold_case,
+            on_hit,
+        );
         return;
     }
     let mut text = String::new();
     for span in spans {
-        text.push_str(&span.text);
+        text.push_str(span.text.get(source));
     }
     search_text(bi, sub, &text, finder, needle_ch, fold_case, on_hit);
 }
@@ -440,7 +458,7 @@ pub fn hit_y(doc: &Doc, layout: &LayoutState, typo: &Typo, hit: Hit) -> f32 {
             top + measure::gap_code_top(em)
                 + 32.0
                 + 12.0
-                + newlines_before(code, hit.start) as f32 * line_h
+                + newlines_before(code.get(&doc.source), hit.start) as f32 * line_h
         }
         BlockKind::Table { aligns, rows } => {
             let ncols = aligns.len().max(1);
@@ -453,7 +471,7 @@ pub fn hit_y(doc: &Doc, layout: &LayoutState, typo: &Typo, hit: Hit) -> f32 {
         | BlockKind::Paragraph { spans }
         | BlockKind::Quote { spans, .. }
         | BlockKind::ListItem { spans, .. } => {
-            top + spans_newlines_before(spans, hit.start) as f32 * typo.row_height()
+            top + spans_newlines_before(spans, hit.start, &doc.source) as f32 * typo.row_height()
         }
         BlockKind::Rule | BlockKind::Image { .. } => top,
     }
@@ -466,16 +484,17 @@ fn newlines_before(text: &str, ch: usize) -> usize {
 }
 
 /// Переводы строки в конкатенации спанов до символа ch.
-fn spans_newlines_before(spans: &[Span], ch: usize) -> usize {
+fn spans_newlines_before(spans: &[Span], ch: usize, source: &str) -> usize {
     let mut acc = 0usize;
     let mut nl = 0usize;
     for span in spans {
         if acc >= ch {
             break;
         }
-        let take = (ch - acc).min(span.text.chars().count());
-        nl += newlines_before(&span.text, take);
-        acc += span.text.chars().count();
+        let text = span.text.get(source);
+        let take = (ch - acc).min(text.chars().count());
+        nl += newlines_before(text, take);
+        acc += text.chars().count();
     }
     nl
 }

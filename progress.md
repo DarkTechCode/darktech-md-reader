@@ -244,7 +244,41 @@ cargo run -- temp/demo.md                 # запуск с демо-файло�
   «ровно через 300 мс»; (4) замороженное синтетическое время в pump держит
   дедлайн вечно будущим — финальные ожидания в тестах реальным временем.
 
-**Этап 2 (типографика и настройки + сверх плана по фидбеку владельца):**
+**Этап 7 (полировка и релиз):**
+- Оптимизация памяти: `Txt` (md/blocks.rs) — enum `Src(Range<usize>) | Own(String)`;
+  спаны и блоки кода хранят ДИАПАЗОНЫ в `Doc::source` вместо дублей строк
+  (было ~2× файла). Парсер (`borrow_or_own`) сравнивает текст события со
+  срезом исходника: совпал — заимствование (обычный текст, код — почти
+  всегда), нет (сущности `&amp;`, softbreak, inline HTML, CRLF-нормализация) —
+  собственная строка. Поле `src` у Span удалено (никем не читалось).
+  Замер GUI с 50 МБ: **265 → 198 МБ** (бюджет < 400). ГРАБЛЯ: при фоновой
+  загрузке source возвращался только в `Done`, а блоки чанков уже несут
+  диапазоны → паника `.get("")` на пустом source; теперь `ParseMsg::Source`
+  приходит ПЕРВЫМ сообщением сразу после чтения файла (рендер чанков готов
+  сразу). Тесты это ловят: streaming-тест ждёт Source до Chunk.
+- Иконка/версия/метаданные: build.rs + winres; `assets/icon.ico` (генерится
+  assets/gen_icon.py — «M» шрифтом JetBrains Mono wght 700 + синяя полоса как
+  подчёркивание h1/h2; палитра приложения); VersionInfo 1.0.0
+  (FileDescription/ProductName/Copyright/ProductVersion). Иконку ОКНА Windows
+  берёт из ресурсов exe автоматически (winit свою не задаёт). Отсутствие
+  rc.exe на хосте — cargo:warning, сборка не падает.
+- Ассоциация `.md` (PLAN §9, HKCU без установщика): `src/associate.rs` —
+  ProgID `DarkTechMD.md`, `.md` default → ProgID, DefaultIcon = «exe,0»,
+  shell\open\command = «"exe" "%1"»; прежний обработчик запоминается в
+  PrevProgId и восстанавливается при отключении; SHChangeNotify гасит кэш
+  проводника. Кнопка в настройках рядом со «Сбросить/Перезапуск»: надпись
+  отражает состояние (is_associated читает реестр; дёшево).
+- Perf-тесты по бюджетам §7 (tests/perf_smoke.rs): 1 МБ разбор+раскладка
+  < 100 мс (open_1mb_first_screen_under_100ms); #[ignore]-50 МБ: полный
+  разбор (< 10 с; фактически 176 мс), память процесса (GetProcessMemoryInfo,
+  Win32_System_ProcessStatus) < 400 МБ (фактически 261 МБ в тесте, GUI 198),
+  поиск первого результата < 300 мс (search_sync — публичная обёртка той же
+  машины; фактически 129 мс на 121k попаданий). Статический CRT проверен
+  (grep VCRUNTIME — пусто).
+- README.md: фичи, бюджеты, сборка `cargo build --release`, тесты, хоткеи.
+- Версия пакета 1.0.0; release exe 13.9 МБ → `bin/DarkTechMD.exe`.
+
+
 - `src/settings/` — serde-модель (camelCase, `#[serde(default)]`, повреждённый →
   дефолты молча) + store (`%APPDATA%\DarkTechMD\settings.json`, атомарно tmp+rename,
   запись с дебаунсом 400 мс). Опции: тема Светлая/Тёмная/Авто, язык Ru/En/Авто,
@@ -285,6 +319,7 @@ fitWidth/нумерация/подсветка/автоскролл/статус
 ## 3. Карта кода
 
 ```
+build.rs               winres: иконка exe (assets/icon.ico), VersionInfo 1.0.0
 src/main.rs            запуск, CLI-пути, NativeOptions (геометрия окна из сессии,
                        viewport_builder + monitor::point_visible)
 src/app.rs             App/Tab (TabState, layout, toc: TocState, selection, find: FindState,
@@ -303,6 +338,9 @@ src/app.rs             App/Tab (TabState, layout, toc: TocState, selection, find
                        попап поиска после центральной панели, copy_selection,
                        missing_banner, find_demo_md, apply_theme/effective_dark,
                        on_exit (синхронное сохранение сессии)
+src/associate.rs       ассоциация .md (HKCU): ProgID DarkTechMD.md, команда «exe "%1"»,
+                       DefaultIcon из ресурсов exe, PrevProgId-откат, SHChangeNotify;
+                       кнопка-переключатель в настройках
 src/clipboard.rs       запись в клипборд ИЗ ФОНА (синхронная может блокировать навсегда)
 src/fonts.rs           регистрация шрифтов (Inter→Proportional/Sans, NotoSerif→Serif, JBMono→Monospace/Mono)
 src/highlight.rs       подсветка syntect: ленивые наборы, прогрев фоном, highlight()
@@ -314,10 +352,12 @@ src/watcher.rs         notify 8: наблюдение КАТАЛОГОВ фай�
                        pump(now) + ближайший дедлайн; тесты (синтетическое время)
 src/md/anchors.rs      слаги заголовков (GitHub-стиль, дедуп), resolve(anchor) → block_idx,
                        percent_decode; тесты
-src/md/blocks.rs       модель: Doc (word/char/line_count)/BlockKind/Span/Fmt/Alert/TableRow,
+src/md/blocks.rs       модель: Doc (word/char/line_count)/BlockKind/Span (текст — Txt:
+                       Src-диапазон в source | Own-строка)/Fmt/Alert/TableRow,
                        Heading { level, text, slug, block_idx }; text_prefix/find_by_prefix
                        (якоря позиции чтения, ANCHOR_LEN=64); тесты
-src/md/parser.rs       pulldown-cmark → блоки; parse() + parse_background() (стрим);
+src/md/parser.rs       pulldown-cmark → блоки; parse() + parse_background() (стрим:
+                       Source → Chunk… → Done, borrow_or_own заимствует текст);
                        count_stats() в Done; слаги при flush_heading
 src/layout/mod.rs      LayoutState: высоты, offsets (безопасные при пустой раскладке),
                        visible_range, компенсация, version (для кэша миникарты),
@@ -341,7 +381,8 @@ src/view/minimap.rs    скелет миникарты: полоски по пи
                        колесо
 src/view/find.rs       поиск: Hit, FindState (запрос/каретка/выделение/позиция попапа),
                        фоновая нить memmem (fold 1:1, пакеты + хвостовой флаш, отмена
-                       поколениями), pump, hit_y/initial_hit (автоскролл); тесты
+                       поколениями), pump, hit_y/initial_hit (автоскролл), search_sync
+                       (синхронный обход для перф-тестов); тесты
 src/view/find_bar.rs   попап поиска: грип-перетаскивание, СВОЁ поле (клик/драг/двойной-
                        тройной клик, каретка, выделение, подсказка), счётчик «3/17…/+»,
                        кнопки ↑/↓/✕; правка запроса (insert/backspace/стрелки по словам)
@@ -363,11 +404,14 @@ src/view/settings_panel.rs  панель настроек: строки «под
 src/view/widgets.rs    flat_text_button, flat_pill_button, plain_galley, wrapped_galley
 src/view/welcome.rs    welcome-экран (масштаб UI-шрифта): «Открыть файл…» + «Последние
                        файлы» (строки-кнопки: имя + каталог, Action::Dialog/Recent)
-tests/parse_basic.rs   6 тестов парсера (включая якоря)
-tests/perf_smoke.rs    бюджеты §7 + LayoutKey-тест; #[ignore] 50 МБ
+tests/parse_basic.rs   6 тестов парсера (включая якоря и заимствование Txt)
+tests/perf_smoke.rs    бюджеты §7: стриминг 20 МБ < 1 с, 1 МБ < 100 мс,
+                       LayoutKey-тест; #[ignore] 50 МБ: разбор + память
+                       (GetProcessMemoryInfo) + поиск < 300 мс
 temp/demo.md, temp/documentation.md   ручные файлы проверки (gitignored; demo.md —
                        «все элементы» + строка якорных ссылок, открывается по умолчанию)
 assets/fonts/          *.ttf + OFL-*.txt
+assets/icon.ico        иконка exe (winres); генератор — assets/gen_icon.py
 ```
 
 ## 4. egui 0.37 — шпаргалка (текстовый стек переписан, много отличий!)
@@ -506,6 +550,9 @@ assets/fonts/          *.ttf + OFL-*.txt
   на мульти-мониторе окно вернётся на первичный (безопасное ограничение).
   `maximized: Option<bool>`, `monitor_size` — там же; чтение
   `ctx.input(|i| i.viewport().inner_rect)`.
+- Фоновая загрузка с заимствованием из source: `ParseMsg::Source` обязан
+  приходить ПЕРВЫМ сообщением (до чанков) — блоки несут диапазоны в source,
+  `.get(source)` на пустом источнике паникует по byte-границе.
 - `eframe::App::on_exit(&mut self, gl: Option<&glow::Context>)` —
   синхронное сохранение при закрытии окна (дебаунс записи мог не успеть).
   ctx в on_exit НЕ дают: храним `cc.egui_ctx.clone()` с App::new —
@@ -514,14 +561,12 @@ assets/fonts/          *.ttf + OFL-*.txt
   eframe сам переводит в пиксели. `notify` на Windows шлёт ДУБЛИ событий
   (Modify(Data) + Modify(Metadata)) на одну запись — дебаунс обязателен.
 
-## 5. Следующий этап — 7. Полировка и релиз
+## 5. Следующий этап — сравнение с MarkMello на реальных файлах владельца
 
-Иконка/версия/метаданные (winres), статический CRT (уже включён —
-проверять `grep -ao "VCRUNTIME[0-9_]*\.dll" exe` — пусто = ок), один exe,
-perf-тесты по бюджетам §7 PLAN, README (сборка: `cargo build --release`);
-оптимизация памяти: спаны заимствуют текст из source вместо дублей строк
-(сейчас текст хранится дважды: source + строки спанов ≈ 2× файла).
-Открытый вопрос PLAN §9: кнопка «ассоциировать .md» (HKCU) — опционально.
+Все этапы плана (0–7) выполнены. Дальше по PLAN §8: день чтения владельца
+на реальных файлах без фризов; чек-лист готовности v1 — PLAN §10. Хвосты —
+ниже; возможные следующие темы: локальные картинки (img_store decode+LRU),
+сворачивание веток оглавления, автоскролл при драге выделения за экран.
 
 ## 6. Известные недоделки/хвосты
 
@@ -555,8 +600,8 @@ perf-тесты по бюджетам §7 PLAN, README (сборка: `cargo bui
 - Ширины колонок таблиц: по шапке + первым 64 строкам; в fit-режиме и при
   выключенном «Скролле в таблицах» колонки сжимаются пропорционально
   (пол 24px) — очень широкие таблицы без пола могут быть тесными.
-- Память: текст хранится дважды (source + строки спанов ≈ 2× файла) + база egui ~75 МБ.
-  Оптимизация — этап 7.
+- Память: дубль текста устранён в этапе 7 (Txt::Src — заимствование из
+  source); остаётся база egui ~75 МБ и структуры блоков. GUI с 50 МБ — 198 МБ.
 - Локальные картинки — плейсхолдер (img_store: decode в фоне, LRU — после v1).
 - Подсветка кода красит видимый срез с перезапуском состояния на границе среза
   (многострочные токены, начавшиеся выше, могут подсветиться неверно) — принято.

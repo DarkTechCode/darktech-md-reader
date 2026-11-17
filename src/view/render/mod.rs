@@ -31,27 +31,28 @@ pub fn render_block(
     prep: &mut Prepared,
     env: &Env,
     frame: &mut SelFrame,
+    source: &str,
 ) -> (Vec<DocEvent>, Option<f32>) {
     let id = ui.scope_id().with(("blk", tab_key, idx));
     ui.scope_builder(UiBuilder::new().max_rect(rect).scope_id(id), |ui| {
         match (block, prep) {
             (BlockKind::Heading { spans, .. }, Prepared::Text(p)) => {
-                (text::render_text(ui, rect, idx, spans, p, env, frame), None)
+                (text::render_text(ui, rect, idx, spans, p, env, frame, source), None)
             }
             (BlockKind::Paragraph { spans }, Prepared::Text(p)) => {
-                (text::render_text(ui, rect, idx, spans, p, env, frame), None)
+                (text::render_text(ui, rect, idx, spans, p, env, frame, source), None)
             }
             (BlockKind::Quote { spans, .. }, Prepared::Text(p)) => {
-                (text::render_text(ui, rect, idx, spans, p, env, frame), None)
+                (text::render_text(ui, rect, idx, spans, p, env, frame, source), None)
             }
             (BlockKind::ListItem { spans, .. }, Prepared::Text(p)) => {
-                (text::render_text(ui, rect, idx, spans, p, env, frame), None)
+                (text::render_text(ui, rect, idx, spans, p, env, frame, source), None)
             }
-            (BlockKind::Code { lang, code }, Prepared::Code(p)) => {
-                code::render_code(ui, rect, vis, idx, lang, code, p, env, frame)
-            }
+            (BlockKind::Code { lang, code }, Prepared::Code(p)) => code::render_code(
+                ui, rect, vis, idx, lang, code.get(source), p, env, frame,
+            ),
             (BlockKind::Table { aligns, rows }, Prepared::Table(p)) => {
-                table::render_table(ui, rect, vis, idx, aligns, rows, p, env, frame)
+                table::render_table(ui, rect, vis, idx, aligns, rows, p, env, frame, source)
             }
             (BlockKind::Rule, Prepared::Rule) => {
                 misc::render_rule(ui, rect, env);

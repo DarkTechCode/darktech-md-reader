@@ -308,6 +308,26 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> boo
         if flat_bordered_button(ui, t(lang, "st_restart"), em, pal) {
             restart = true;
         }
+        // Ассоциация .md (HKCU, без установщика — PLAN §9): надпись отражает
+        // текущее состояние; реестр читается каждый кадр (дёшево).
+        ui.add_space(10.0);
+        let associated = crate::associate::is_associated();
+        let label = if associated {
+            t(lang, "st_assoc_remove")
+        } else {
+            t(lang, "st_assoc_add")
+        };
+        if flat_bordered_button(ui, label, em, pal) {
+            let res = if associated {
+                crate::associate::remove()
+            } else {
+                crate::associate::associate()
+            };
+            if let Err(e) = res {
+                log::warn!("ассоциация .md: {e}");
+            }
+            ui.ctx().request_repaint();
+        }
     });
 
     // Подпись автора: сайт и GitHub открываются в браузере.

@@ -77,8 +77,10 @@ impl LayoutState {
         }
         let n = doc.blocks.len();
         if self.heights.len() < n {
+            let source = doc.source.as_ref();
             for block in &doc.blocks[self.heights.len()..] {
-                self.heights.push(measure::estimate(block, &key.typo, key.width));
+                self.heights
+                    .push(measure::estimate(block, &key.typo, key.width, source));
                 self.measured.push(false);
             }
             self.dirty = true;

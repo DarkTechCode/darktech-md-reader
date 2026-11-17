@@ -23,6 +23,7 @@ pub fn render_table(
     prep: &mut TablePrep,
     env: &Env,
     frame: &mut SelFrame,
+    source: &str,
 ) -> (Vec<DocEvent>, Option<f32>) {
     let pad_h = prep.pad_h;
     let pad_v = prep.pad_v;
@@ -32,7 +33,7 @@ pub fn render_table(
     let area = Rect::from_min_size(pos2(rect.min.x, top), vec2(rect.width(), content_h));
     let (out, new_height) = ui
         .scope_builder(UiBuilder::new().max_rect(area), |ui| {
-            scroll_rows(ui, vis, idx, aligns, rows, prep, pad_h, pad_v, content_h, env, frame)
+            scroll_rows(ui, vis, idx, aligns, rows, prep, pad_h, pad_v, content_h, env, frame, source)
         })
         .inner;
 
@@ -52,6 +53,7 @@ fn scroll_rows(
     content_h: f32,
     env: &Env,
     frame: &mut SelFrame,
+    source: &str,
 ) -> (Vec<DocEvent>, Option<f32>) {
     let ncols = aligns.len().max(1);
     let mut events = Vec::new();
@@ -80,7 +82,7 @@ fn scroll_rows(
                     let mut spec = prep.cell.clone();
                     spec.bold = ri == 0;
                     spec.wrap = prep.col_w.get(ci).copied().unwrap_or(300.0) - pad_h * 2.0;
-                    let job = spec.job(cell, env.pal, None);
+                    let job = spec.job(cell, env.pal, None, source);
                     let g = ui.painter().layout_job(job);
                     row_h = row_h.max(g.size().y + pad_v * 2.0);
                     galleys.push(g);
@@ -133,10 +135,11 @@ fn scroll_rows(
                             rect: cell_rect,
                             spans: cell,
                             spec: &spec,
+                            source,
                             block: idx,
                             sub: ri * ncols + ci,
                             base_ch: 0,
-                            total_ch: cell.iter().map(|s| s.text.chars().count()).sum(),
+                            total_ch: cell.iter().map(|s| s.text.get(source).chars().count()).sum(),
                         },
                         frame,
                     ));

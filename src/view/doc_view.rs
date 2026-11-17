@@ -181,14 +181,16 @@ pub fn show(
         for i in vr {
             let block = &doc.blocks[i];
             if layout.prepared(i).is_none() {
-                let (p, h) = measure::measure_block(ui, env, col, block);
+                let (p, h) = measure::measure_block(ui, env, col, block, &doc.source);
                 layout.set_measured(i, h);
                 layout.put_prepared(i, p);
             }
             let h = layout.height(i);
             let rect = Rect::from_min_size(pos2(x0, y), Vec2::new(col, h));
             let prep = layout.prepared_mut(i).expect("prepared только что создан");
-            let (ev, new_h) = render::render_block(ui, rect, vis, tab_key, i, block, prep, env, &mut frame);
+            let (ev, new_h) = render::render_block(
+                ui, rect, vis, tab_key, i, block, prep, env, &mut frame, &doc.source,
+            );
             if let Some(h) = new_h {
                 layout.set_measured(i, h);
             }

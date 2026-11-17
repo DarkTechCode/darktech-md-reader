@@ -150,6 +150,7 @@ pub fn render_code(
                             rect: label_rect,
                             spans: &[],
                             spec: &spec,
+                            source: "",
                             block: idx,
                             sub: 0,
                             base_ch: prep.line_char_starts[a] as usize,
@@ -182,7 +183,7 @@ fn plain_code_job(slice: &str, prep: &CodePrep, env: &Env) -> LayoutJob {
         line_height: prep.line_h,
         letter_spacing: env.typo.letter_spacing,
     };
-    spec.job(&[plain_span(slice)], env.pal, None)
+    spec.job(&[plain_span(slice)], env.pal, None, "")
 }
 
 /// LayoutJob из подсвеченных кусков. Результат подсветки кэшируется по

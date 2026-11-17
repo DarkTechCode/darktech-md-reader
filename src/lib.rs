@@ -1,6 +1,7 @@
 //! DarkTechMD — быстрая читалка Markdown. Автор: Dark Wizard, https://darktech.ru
 
 pub mod app;
+pub mod associate;
 pub mod clipboard;
 pub mod fonts;
 pub mod highlight;

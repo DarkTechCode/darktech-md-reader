@@ -185,7 +185,6 @@ enum Pumped {
         word_count: usize,
         char_count: usize,
         line_count: usize,
-        source: Arc<str>,
     },
     Failed(String),
 }
@@ -194,6 +193,9 @@ fn pump_rx(rx: &Receiver<ParseMsg>, doc: &mut Doc) -> Pumped {
     let mut res = Pumped::Still;
     while let Ok(msg) = rx.try_recv() {
         match msg {
+            // Первое сообщение: исходник до начала разбора — блоки чанков
+            // заимствуют из него строки (Txt::Src), рендер готов сразу.
+            ParseMsg::Source(source) => doc.source = source,
             ParseMsg::Chunk { blocks, headings } => {
                 doc.blocks.extend(blocks);
                 doc.headings.extend(headings);
@@ -202,12 +204,10 @@ fn pump_rx(rx: &Receiver<ParseMsg>, doc: &mut Doc) -> Pumped {
                 word_count,
                 char_count,
                 line_count,
-                source,
             } => res = Pumped::Done {
                 word_count,
                 char_count,
                 line_count,
-                source,
             },
             ParseMsg::Failed(e) => res = Pumped::Failed(e),
         }
@@ -318,12 +318,10 @@ impl App {
                         word_count,
                         char_count,
                         line_count,
-                        source,
                     } => {
                         doc.word_count = word_count;
                         doc.char_count = char_count;
                         doc.line_count = line_count;
-                        doc.source = source;
                         let full = std::mem::replace(doc, Doc::empty());
                         done = Some(TabState::Ready(Arc::new(full)));
                     }

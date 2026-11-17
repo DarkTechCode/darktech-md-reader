@@ -112,17 +112,37 @@ fn task_list_and_tight_spacing() {
     assert_eq!(tasks, vec![Some(false), Some(true)]);
 }
 
+/// Обычный текст заимствуется из исходника (Txt::Src — без дубля строк),
+/// декодированные сущности остаются собственной строкой (Txt::Own).
 #[test]
-fn source_ranges_preserved() {
-    let src = "Первый абзац сохраняет диапазоны.\n\nВторой тоже.\n";
+fn spans_borrow_source_except_entities() {
+    use darktech_md::md::blocks::Txt;
+    let src = "Первый абзац сохраняет диапазоны.\n\nСущность &amp; и текст.\n";
     let doc = parse(Arc::from(src));
-    for block in &doc.blocks {
-        if let BlockKind::Paragraph { spans } = block {
-            for span in spans {
-                let r = span.src.clone().expect("src range");
-                assert_eq!(&src[r], span.text, "спан совпадает с source");
-            }
+    let BlockKind::Paragraph { spans } = &doc.blocks[0] else {
+        panic!("ожидался абзац");
+    };
+    assert!(
+        spans.iter().all(|s| matches!(s.text, Txt::Src(_))),
+        "обычный текст заимствован из source"
+    );
+
+    let BlockKind::Paragraph { spans } = &doc.blocks[1] else {
+        panic!("ожидался абзац");
+    };
+    let entity = spans
+        .iter()
+        .find(|s| matches!(s.text, Txt::Own(_)))
+        .expect("сущность декодирована — хранится своей строкой");
+    assert_eq!(entity.text.get(&doc.source), "&");
+    // Код — точный срез исходника: тоже заимствуется.
+    let doc2 = parse(Arc::from("```python\nprint('привет')\n```\n"));
+    match &doc2.blocks[0] {
+        BlockKind::Code { code, .. } => {
+            assert!(matches!(code, Txt::Src(_)));
+            assert!(code.get(&doc2.source).contains("привет"));
         }
+        other => panic!("ожидался Code, получен {other:?}"),
     }
 }
 
@@ -133,7 +153,7 @@ fn code_block_keeps_text() {
     match &doc.blocks[0] {
         BlockKind::Code { lang, code } => {
             assert_eq!(lang.as_deref(), Some("python"));
-            assert!(code.contains("привет"));
+            assert!(code.get(&doc.source).contains("привет"));
         }
         other => panic!("ожидался Code, получен {other:?}"),
     }

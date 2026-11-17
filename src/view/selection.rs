@@ -480,11 +480,12 @@ fn link_at(doc: &Doc, regions: &[Region], pos: Pos2) -> Option<String> {
     let (i, _) = hit(regions, pos)?;
     let r = &regions[i];
     let spans = block_sub_spans(doc.blocks.get(r.block)?, r.sub)?;
-    let starts = crate::layout::measure::char_starts(spans);
+    let source = doc.source.as_ref();
+    let starts = crate::layout::measure::char_starts(spans, source);
     for (si, span) in spans.iter().enumerate() {
         let Some(url) = span.link.as_deref() else { continue };
         let cs = starts[si];
-        let ce = cs + span.text.chars().count();
+        let ce = cs + span.text.get(source).chars().count();
         let rect = r
             .galley
             .pos_from_cursor(CCursor::new(cs))
@@ -523,11 +524,12 @@ pub fn end_pos(doc: &Doc) -> SelPos {
     let Some(b) = doc.blocks.len().checked_sub(1) else {
         return SelPos::default();
     };
-    let spans_ch = |spans: &[Span]| spans.iter().map(|s| s.text.chars().count()).sum();
+    let source = doc.source.as_ref();
+    let spans_ch = |spans: &[Span]| spans.iter().map(|s| s.text.get(source).chars().count()).sum();
     match &doc.blocks[b] {
         BlockKind::Code { code, .. } => SelPos {
             block: b,
-            ch: code.chars().count(),
+            ch: code.get(source).chars().count(),
             ..SelPos::default()
         },
         BlockKind::Table { aligns, rows } => {
@@ -564,6 +566,7 @@ pub fn end_pos(doc: &Doc) -> SelPos {
 /// Обход выделенного текста кусками: срезы спанов/кода + разделители
 /// (блоки «\n\n», строки таблиц «\n», ячейки «\t») — в порядке документа.
 fn walk_selection(doc: &Doc, s: SelPos, e: SelPos, mut f: impl FnMut(&str)) {
+    let source = doc.source.as_ref();
     let last_block = doc.blocks.len().saturating_sub(1);
     for bi in s.block..=e.block.min(last_block) {
         let first = bi == s.block;
@@ -578,13 +581,13 @@ fn walk_selection(doc: &Doc, s: SelPos, e: SelPos, mut f: impl FnMut(&str)) {
                 if bi > s.block {
                     f("\n\n");
                 }
-                walk_spans(spans, a(0), b(0), &mut f);
+                walk_spans(spans, a(0), b(0), source, &mut f);
             }
             BlockKind::Code { code, .. } => {
                 if bi > s.block {
                     f("\n\n");
                 }
-                f(char_slice(code, a(0), b(0)));
+                f(char_slice(code.get(source), a(0), b(0)));
             }
             BlockKind::Table { aligns, rows } => {
                 if bi > s.block {
@@ -604,7 +607,7 @@ fn walk_selection(doc: &Doc, s: SelPos, e: SelPos, mut f: impl FnMut(&str)) {
                         } else if emitted_row {
                             f("\n");
                         }
-                        walk_spans(cell, a(sub), b(sub), &mut f);
+                        walk_spans(cell, a(sub), b(sub), source, &mut f);
                         emitted_cell = true;
                         emitted_row = true;
                     }
@@ -616,13 +619,14 @@ fn walk_selection(doc: &Doc, s: SelPos, e: SelPos, mut f: impl FnMut(&str)) {
 }
 
 /// Срезы спанов, пересекающих диапазон [a, b) символов конкатенации.
-fn walk_spans(spans: &[Span], a: usize, b: usize, f: &mut impl FnMut(&str)) {
+fn walk_spans(spans: &[Span], a: usize, b: usize, source: &str, f: &mut impl FnMut(&str)) {
     let mut acc = 0usize;
     for span in spans {
-        let len = span.text.chars().count();
+        let text = span.text.get(source);
+        let len = text.chars().count();
         let (s, e) = (acc.max(a), (acc + len).min(b));
         if s < e {
-            f(char_slice(&span.text, s - acc, e - acc));
+            f(char_slice(text, s - acc, e - acc));
         }
         acc += len;
     }
@@ -663,15 +667,18 @@ fn compute_stats(doc: &Doc, s: SelPos, e: SelPos) -> SelStats {
 /// без нарезки, только длины спанов/кода.
 fn selection_bytes(doc: &Doc, s: SelPos, e: SelPos) -> usize {
     let mut total = 0usize;
+    let source = doc.source.as_ref();
     let last_block = doc.blocks.len().saturating_sub(1);
     for bi in s.block..=e.block.min(last_block) {
-        let mut add = |spans: &[Span]| total += spans.iter().map(|x| x.text.len()).sum::<usize>();
+        let mut add = |spans: &[Span]| {
+            total += spans.iter().map(|x| x.text.get(source).len()).sum::<usize>()
+        };
         match &doc.blocks[bi] {
             BlockKind::Heading { spans, .. }
             | BlockKind::Paragraph { spans }
             | BlockKind::Quote { spans, .. }
             | BlockKind::ListItem { spans, .. } => add(spans),
-            BlockKind::Code { code, .. } => total += code.len(),
+            BlockKind::Code { code, .. } => total += code.get(source).len(),
             BlockKind::Table { rows, .. } => {
                 for row in rows {
                     for cell in &row.cells {

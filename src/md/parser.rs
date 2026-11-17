@@ -11,7 +11,7 @@ use std::sync::mpsc::Sender;
 use pulldown_cmark::{BlockQuoteKind, CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 use super::anchors::unique_slug;
-use super::blocks::{Align, Alert, BlockKind, Doc, Fmt, Heading, ListMarker, Span, TableRow};
+use super::blocks::{Align, Alert, BlockKind, Doc, Fmt, Heading, ListMarker, Span, TableRow, Txt};
 
 /// Файлы меньше этого размера читаются и разбираются синхронно (мгновенно).
 pub const SYNC_LIMIT: u64 = 1 << 20;
@@ -20,6 +20,10 @@ pub const CHUNK_BLOCKS: usize = 512;
 
 /// Сообщение фонового разбора.
 pub enum ParseMsg {
+    /// Исходный текст — первым сообщением сразу после чтения файла:
+    /// блоки заимствуют из него строки (Txt::Src), UI может рендерить
+    /// чанки ещё до конца разбора.
+    Source(Arc<str>),
     Chunk {
         blocks: Vec<BlockKind>,
         headings: Vec<Heading>,
@@ -28,8 +32,6 @@ pub enum ParseMsg {
         word_count: usize,
         char_count: usize,
         line_count: usize,
-        /// Исходный текст возвращается в UI по готовности (Arc — дёшево).
-        source: Arc<str>,
     },
     Failed(String),
 }
@@ -57,9 +59,12 @@ pub fn parse_background(path: PathBuf, tx: Sender<ParseMsg>) {
             }
         };
         let source: Arc<str> = Arc::from(text.as_str());
+        if tx.send(ParseMsg::Source(source.clone())).is_err() {
+            return; // вкладку закрыли — бросаем разбор
+        }
         let mut st = State::new();
         for (event, range) in Parser::new_ext(&source, opts()).into_offset_iter() {
-            handle_event(&mut st, event, range);
+            handle_event(&mut st, event, range, &source);
             if st.blocks.len() >= CHUNK_BLOCKS && !st.send_chunk(&tx) {
                 return; // вкладку закрыли — бросаем разбор
             }
@@ -70,7 +75,6 @@ pub fn parse_background(path: PathBuf, tx: Sender<ParseMsg>) {
             word_count: source.split_whitespace().count(),
             char_count,
             line_count,
-            source,
         });
     });
 }
@@ -116,6 +120,15 @@ struct TableCtx {
     in_head: bool,
 }
 
+/// Собираемый блок кода: текст копится, диапазон — от первого до последнего
+/// события; если текст совпал со срезом исходника, код заимствуется из него.
+struct CodeAcc {
+    lang: Option<String>,
+    text: String,
+    start: usize,
+    end: usize,
+}
+
 struct State {
     blocks: Vec<BlockKind>,
     headings: Vec<Heading>,
@@ -130,10 +143,11 @@ struct State {
     alert: Option<Alert>,
     /// Уровень заголовка, который сейчас собираем.
     heading: Option<u8>,
-    /// Собираемый блок кода: (язык, текст).
-    code: Option<(Option<String>, String)>,
-    /// Собираемый блок HTML.
+    /// Собираемый блок кода.
+    code: Option<CodeAcc>,
+    /// Собираемый блок HTML: текст + охват диапазонов событий.
     html: String,
+    html_range: Option<Range<usize>>,
     in_html_block: bool,
     table: Option<TableCtx>,
     /// Кандидат на «картинку-абзац»: (url, alt). Действует, пока абзац
@@ -160,6 +174,7 @@ impl State {
             heading: None,
             code: None,
             html: String::new(),
+            html_range: None,
             in_html_block: false,
             table: None,
             para_img: None,
@@ -187,7 +202,7 @@ impl State {
 pub fn parse(source: Arc<str>) -> Doc {
     let mut st = State::new();
     for (event, range) in Parser::new_ext(&source, opts()).into_offset_iter() {
-        handle_event(&mut st, event, range);
+        handle_event(&mut st, event, range, &source);
     }
     let (char_count, line_count) = count_stats(&source);
     Doc {
@@ -211,22 +226,25 @@ fn count_stats(source: &str) -> (usize, usize) {
     (chars, lines)
 }
 
-fn handle_event(st: &mut State, event: Event, range: Range<usize>) {
+fn handle_event(st: &mut State, event: Event, range: Range<usize>, source: &str) {
     match event {
         Event::Start(tag) => start_tag(st, tag),
-        Event::End(end) => end_tag(st, end),
-        Event::Text(text) => push_text(st, text.into_string(), Some(range)),
-        Event::Code(text) => push_code(st, text.into_string(), Some(range)),
+        Event::End(end) => end_tag(st, end, source),
+        Event::Text(text) => push_text(st, text.into_string(), range, source),
+        Event::Code(text) => push_code(st, text.into_string(), range, source),
         Event::Html(html) => {
             if st.in_html_block {
                 st.html.push_str(&html);
+                let r = st.html_range.get_or_insert(range.clone());
+                r.start = r.start.min(range.start);
+                r.end = r.end.max(range.end);
             } else {
                 push_inline_html(st, &html);
             }
         }
         Event::InlineHtml(html) => push_inline_html(st, &html),
-        Event::SoftBreak => push_synthetic(st, " ", Some(range)),
-        Event::HardBreak => push_synthetic(st, "\n", Some(range)),
+        Event::SoftBreak => push_synthetic(st, " "),
+        Event::HardBreak => push_synthetic(st, "\n"),
         Event::Rule => {
             flush_before_block(st);
             st.blocks.push(BlockKind::Rule);
@@ -289,7 +307,12 @@ fn start_tag(st: &mut State, tag: Tag) {
                     .next()
                     .map(|s| s.to_ascii_lowercase()),
             };
-            st.code = Some((lang, String::new()));
+            st.code = Some(CodeAcc {
+                lang,
+                text: String::new(),
+                start: usize::MAX,
+                end: 0,
+            });
         }
         Tag::HtmlBlock => {
             flush_before_block(st);
@@ -364,10 +387,10 @@ fn start_tag(st: &mut State, tag: Tag) {
     }
 }
 
-fn end_tag(st: &mut State, end: TagEnd) {
+fn end_tag(st: &mut State, end: TagEnd, source: &str) {
     match end {
         TagEnd::Paragraph => flush_para(st),
-        TagEnd::Heading(_) => flush_heading(st),
+        TagEnd::Heading(_) => flush_heading(st, source),
         TagEnd::BlockQuote(_) => {
             st.quote_depth = st.quote_depth.saturating_sub(1);
             if st.quote_depth == 0 {
@@ -375,17 +398,22 @@ fn end_tag(st: &mut State, end: TagEnd) {
             }
         }
         TagEnd::CodeBlock => {
-            if let Some((lang, code)) = st.code.take() {
-                st.blocks.push(BlockKind::Code { lang, code });
+            if let Some(acc) = st.code.take() {
+                let code = borrow_or_own(acc.text, acc.start..acc.end, source);
+                st.blocks.push(BlockKind::Code {
+                    lang: acc.lang,
+                    code,
+                });
             }
         }
         TagEnd::HtmlBlock => {
             st.in_html_block = false;
             let code = std::mem::take(&mut st.html);
+            let range = st.html_range.take().unwrap_or(0..0);
             if !code.trim().is_empty() {
                 st.blocks.push(BlockKind::Code {
                     lang: Some("html".into()),
-                    code,
+                    code: borrow_or_own(code, range, source),
                 });
             }
         }
@@ -450,10 +478,10 @@ fn flush_para(st: &mut State) {
     flush_spans(st);
 }
 
-fn flush_heading(st: &mut State) {
+fn flush_heading(st: &mut State, source: &str) {
     let level = st.heading.take().unwrap_or(6);
     let spans = std::mem::take(&mut st.spans);
-    let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+    let text: String = spans.iter().map(|s| s.text.get(source)).collect();
     let heading_idx = st.headings.len();
     let slug = unique_slug(&text, &mut st.slugs);
     st.headings.push(Heading {
@@ -514,9 +542,11 @@ fn flush_spans(st: &mut State) {
 }
 
 /// Текст события: в блоке кода копится код, в alt картинки — alt, иначе — спан.
-fn push_text(st: &mut State, text: String, src: Option<Range<usize>>) {
-    if let Some((_, code)) = st.code.as_mut() {
-        code.push_str(&text);
+fn push_text(st: &mut State, text: String, range: Range<usize>, source: &str) {
+    if let Some(acc) = st.code.as_mut() {
+        acc.text.push_str(&text);
+        acc.start = acc.start.min(range.start);
+        acc.end = acc.end.max(range.end);
         return;
     }
     if st.in_img_alt {
@@ -527,28 +557,26 @@ fn push_text(st: &mut State, text: String, src: Option<Range<usize>>) {
     }
     st.para_has_other = true;
     st.spans.push(Span {
-        text,
-        src,
+        text: borrow_or_own(text, range, source),
         fmt: current_fmt(st),
         link: current_link(st),
     });
 }
 
 /// Инлайн-код `…`.
-fn push_code(st: &mut State, text: String, src: Option<Range<usize>>) {
+fn push_code(st: &mut State, text: String, range: Range<usize>, source: &str) {
     st.para_has_other = true;
     let mut fmt = current_fmt(st);
     fmt.code = true;
     st.spans.push(Span {
-        text,
-        src,
+        text: borrow_or_own(text, range, source),
         fmt,
         link: current_link(st),
     });
 }
 
-/// Синтезированный спан (перевод строки и т.п.).
-fn push_synthetic(st: &mut State, text: &str, src: Option<Range<usize>>) {
+/// Синтезированный спан (перевод строки и т.п.): текст отличается от среза.
+fn push_synthetic(st: &mut State, text: &str) {
     if st.in_img_alt {
         if let Some((_, alt)) = st.para_img.as_mut() {
             alt.push(' ');
@@ -560,18 +588,26 @@ fn push_synthetic(st: &mut State, text: &str, src: Option<Range<usize>>) {
     }
     st.para_has_other = true;
     st.spans.push(Span {
-        text: text.into(),
-        src,
+        text: Txt::Own(text.into()),
         fmt: current_fmt(st),
         link: current_link(st),
     });
 }
 
+/// Заимствует текст из исходника, если он точно совпал со срезом диапазона
+/// (сущности `&amp;` и нормализации не совпадут — останутся своей строкой).
+fn borrow_or_own(text: String, range: Range<usize>, source: &str) -> Txt {
+    if source.get(range.clone()) == Some(text.as_str()) {
+        Txt::Src(range)
+    } else {
+        Txt::Own(text)
+    }
+}
+
 fn push_inline_html(st: &mut State, html: &str) {
     st.para_has_other = true;
     st.spans.push(Span {
-        text: html.to_string(),
-        src: None,
+        text: Txt::Own(html.to_string()),
         fmt: Fmt {
             html: true,
             ..current_fmt(st)

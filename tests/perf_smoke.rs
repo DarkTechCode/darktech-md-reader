@@ -1,6 +1,6 @@
-//! Бюджеты производительности (PLAN §7): стриминговый парсинг больших файлов
-//! и логика виртуализации (оценки/префикс-суммы/видимый диапазон).
-//! Тяжёлый тест 50 МБ помечен #[ignore] — запускать:
+//! Бюджеты производительности (PLAN §7): стриминговый парсинг больших файлов,
+//! поиск и логика виртуализации (оценки/префикс-суммы/видимый диапазон).
+//! Тяжёлые тесты 50 МБ помечены #[ignore] — запускать:
 //! `cargo test --release --test perf_smoke -- --ignored`.
 
 use std::path::PathBuf;
@@ -59,17 +59,23 @@ fn temp_file(name: &str, target_mb: usize) -> PathBuf {
 
 /// §7: 50 МБ → первый экран < 1 с. Здесь — первый чанк стрима 20 МБ < 1 c
 /// (в debug тоже должен проходить с запасом: чтение + 512 блоков).
+/// Исходник приходит ПЕРВЫМ сообщением (блоки заимствуют из него строки).
 #[test]
 fn streaming_first_chunk_under_1s() {
     let path = temp_file("perf20.md", 20);
     let (tx, rx) = mpsc::channel();
     let t0 = Instant::now();
     parse_background(path.clone(), tx);
-    let first = rx.recv().expect("первый чанк");
+    let first = rx.recv().expect("первое сообщение");
+    assert!(
+        matches!(first, ParseMsg::Source(s) if s.len() > 20 * 1024 * 1024),
+        "первым сообщением — исходник (до чанков, блоки заимствуют из него)"
+    );
+    let second = rx.recv().expect("первый чанк");
     let dt = t0.elapsed();
     assert!(
-        matches!(first, ParseMsg::Chunk { .. }),
-        "первым сообщением должен быть чанк блоков"
+        matches!(second, ParseMsg::Chunk { .. }),
+        "вторым сообщением должен быть чанк блоков"
     );
     assert!(dt.as_secs_f32() < 1.0, "первый чанк занял {dt:?}");
 
@@ -79,6 +85,7 @@ fn streaming_first_chunk_under_1s() {
     let mut prev_len: Option<usize> = None;
     while let Ok(msg) = rx.recv() {
         match msg {
+            ParseMsg::Source(_) => panic!("исходник приходит один раз, первым"),
             ParseMsg::Chunk { blocks: b, .. } => {
                 if let Some(prev) = prev_len {
                     assert_eq!(prev, CHUNK_BLOCKS, "промежуточный чанк неполный");
@@ -90,14 +97,12 @@ fn streaming_first_chunk_under_1s() {
                 word_count,
                 char_count,
                 line_count,
-                source,
             } => {
                 assert!(word_count > 1_000_000, "слова посчитаны: {word_count}");
                 // Байтов больше, чем символов (кириллица — 2 байта): 20 МБ
                 // текста — заведомо больше 10 М символов.
                 assert!(char_count > 10_000_000, "символы посчитаны");
                 assert!(line_count > 10_000, "строки посчитаны");
-                assert!(source.len() > 20 * 1024 * 1024);
                 assert!(blocks > 10_000, "блоков: {blocks}");
                 assert!(prev_len.is_some(), "хотя бы один чанк");
                 return;
@@ -116,9 +121,38 @@ fn estimates_are_sane() {
     assert!(!doc.blocks.is_empty());
     let typo = Typo::default();
     for b in &doc.blocks {
-        let h = measure::estimate(b, &typo, 820.0);
+        let h = measure::estimate(b, &typo, 820.0, &doc.source);
         assert!(h.is_finite() && h > 0.0 && h < 100_000.0, "высота {h} у {b:?}");
     }
+}
+
+/// §7: открытие 1 МБ → первый экран < 100 мс. «Первый экран» = разбор +
+/// раскладка (ensure: оценки высот и префикс-суммы всего документа —
+/// видимые блоки меряются лениво при отрисовке).
+#[test]
+fn open_1mb_first_screen_under_100ms() {
+    let src = gen_md(1024 * 1024);
+    let t0 = Instant::now();
+    let doc = parse(src.as_str().into());
+    let typo = Typo::default();
+    let mut layout = LayoutState::default();
+    layout.ensure(
+        &doc,
+        LayoutKey {
+            typo,
+            width: 820.0,
+            dark: true,
+            lang: darktech_md::i18n::Lang::Ru,
+            code_nums: false,
+            table_scroll: true,
+        },
+    );
+    let dt = t0.elapsed();
+    assert!(doc.blocks.len() > 500, "блоков: {}", doc.blocks.len());
+    assert!(
+        dt.as_secs_f32() < 0.1,
+        "1 МБ: разбор + раскладка заняли {dt:?}"
+    );
 }
 
 /// Префикс-суммы и видимый диапазон: монотонность, полнота окна, стабильность
@@ -161,7 +195,7 @@ fn layout_state_visible_range_and_anchor() {
     // пересобирает суммы и не двигает якорь (блоки выше не трогали).
     let i = win.start;
     let off_before = layout.offset(i);
-    let measured = measure::estimate(&doc.blocks[i], &typo, 820.0) * 2.0;
+    let measured = measure::estimate(&doc.blocks[i], &typo, 820.0, &doc.source) * 2.0;
     layout.set_measured(i, measured);
     let changed = layout.finish_frame(i);
     assert!(changed, "пересборка сумм требуется");
@@ -177,7 +211,8 @@ fn layout_state_visible_range_and_anchor() {
     assert!((delta - 100.0).abs() < 0.5, "дельта {delta}");
 }
 
-/// Тяжёлый: полный разбор 50 МБ (release). Запуск: --release -- --ignored.
+/// Тяжёлый: полный разбор 50 МБ (release) + бюджет памяти §7 (< 400 МБ).
+/// Запуск: --release -- --ignored.
 #[test]
 #[ignore = "тяжёлый тест: cargo test --release -- --ignored"]
 fn parse_50mb_full() {
@@ -186,8 +221,10 @@ fn parse_50mb_full() {
     let t0 = Instant::now();
     parse_background(path, tx);
     let mut blocks = 0usize;
+    let mut doc = None;
     while let Ok(msg) = rx.recv() {
         match msg {
+            ParseMsg::Source(source) => doc = Some(source),
             ParseMsg::Chunk { blocks: b, .. } => blocks += b.len(),
             ParseMsg::Done { .. } => break,
             ParseMsg::Failed(e) => panic!("{e}"),
@@ -196,4 +233,54 @@ fn parse_50mb_full() {
     let dt = t0.elapsed();
     eprintln!("50 МБ: {blocks} блоков за {dt:?}");
     assert!(dt.as_secs_f32() < 10.0, "разбор 50 МБ занял {dt:?}");
+    let _ = doc; // держим исходник в памяти до замера
+    let mem = working_set_mb();
+    eprintln!("50 МБ: рабочий набор {mem:.0} МБ (бюджет 400)");
+    assert!(mem < 400.0, "память процесса {mem} МБ — бюджет 400 МБ");
+}
+
+/// Тяжёлый: §7 поиск по 50 МБ — первый результат < 300 мс (полный подсчёт
+/// уходит в фон и бюджетом не лимитируется). Запуск: --release -- --ignored.
+#[test]
+#[ignore = "тяжёлый тест: cargo test --release -- --ignored"]
+fn search_50mb_first_hit_under_300ms() {
+    let path = temp_file("perf50.md", 50);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let doc = parse(text.as_str().into());
+    assert!(doc.blocks.len() > 100_000);
+    // Первый hit: обход блоков до первого вхождения.
+    let t0 = Instant::now();
+    let mut hits = 0usize;
+    darktech_md::view::find::search_sync(&doc, "lorem", |_h| {
+        hits += 1;
+        hits < 3 // первые пару попаданий — и стоп (как «первый результат»)
+    });
+    let dt = t0.elapsed();
+    eprintln!("50 МБ: первые {hits} попаданий за {dt:?}");
+    assert!(
+        dt.as_secs_f32() < 0.3,
+        "первый результат поиска 50 МБ занял {dt:?}"
+    );
+}
+
+/// Рабочий набор процесса, МБ (Windows).
+#[cfg(windows)]
+fn working_set_mb() -> f64 {
+    use windows_sys::Win32::System::ProcessStatus::GetProcessMemoryInfo;
+    use windows_sys::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut counters = PROCESS_MEMORY_COUNTERS {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        let ok = GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb);
+        assert_eq!(ok, 1, "GetProcessMemoryInfo");
+    }
+    counters.WorkingSetSize as f64 / (1024.0 * 1024.0)
+}
+
+#[cfg(not(windows))]
+fn working_set_mb() -> f64 {
+    0.0 // бюджет не проверяется
 }

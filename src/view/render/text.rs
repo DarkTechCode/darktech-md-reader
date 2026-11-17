@@ -29,6 +29,8 @@ pub struct Place<'a> {
     pub spans: &'a [Span],
     /// Спецификация job (пересборка с подсветкой ссылки).
     pub spec: &'a JobSpec,
+    /// Исходник документа (тексты спанов — диапазоны в нём).
+    pub source: &'a str,
     /// Координаты выделения: блок / под-область / база видимого среза.
     pub block: usize,
     pub sub: usize,
@@ -46,6 +48,7 @@ pub fn render_text(
     prep: &TextPrep,
     env: &Env,
     frame: &mut SelFrame,
+    source: &str,
 ) -> Vec<DocEvent> {
     let painter = ui.painter().clone();
     let o = rect.min;
@@ -92,6 +95,7 @@ pub fn render_text(
             rect: label_rect,
             spans,
             spec: &prep.spec,
+            source,
             block,
             sub: 0,
             base_ch: 0,
@@ -131,11 +135,11 @@ pub fn place_text(ui: &mut Ui, pal: &Palette, p: Place<'_>, f: &mut SelFrame) ->
     if p.spans.iter().any(|s| s.link.is_some())
         && let Some(pos) = f.pointer
     {
-        let starts = char_starts(p.spans);
+        let starts = char_starts(p.spans, p.source);
         for (i, span) in p.spans.iter().enumerate() {
             let Some(url) = span.link.as_deref() else { continue };
             let cs = starts[i];
-            let ce = cs + span.text.chars().count();
+            let ce = cs + span.text.get(p.source).chars().count();
             let r = p
                 .galley
                 .pos_from_cursor(CCursor::new(cs))
@@ -151,7 +155,10 @@ pub fn place_text(ui: &mut Ui, pal: &Palette, p: Place<'_>, f: &mut SelFrame) ->
     // Галлей кадра: с подсветкой ссылки под курсором (та же раскладка) —
     // и с подсветкой выделения, вклеенной за глифами.
     let mut galley = match &hover {
-        Some((url, _)) => ui.painter().layout_job(p.spec.job(p.spans, pal, Some(url))),
+        Some((url, _)) => {
+            ui.painter()
+                .layout_job(p.spec.job(p.spans, pal, Some(url), p.source))
+        }
         None => p.galley.clone(),
     };
     if !f.find_hits.is_empty() {

@@ -44,8 +44,15 @@ impl JobSpec {
     }
 
     /// Собирает job из спанов (секции 1:1 со спанами, для хит-теста ссылок).
-    /// `hover_link` — URL ссылки под курсором (подсветить её).
-    pub fn job(&self, spans: &[Span], pal: &Palette, hover_link: Option<&str>) -> LayoutJob {
+    /// `hover_link` — URL ссылки под курсором (подсветить её). `source` —
+    /// исходник документа (спаны хранят диапазоны в нём, а не копии строк).
+    pub fn job(
+        &self,
+        spans: &[Span],
+        pal: &Palette,
+        hover_link: Option<&str>,
+        source: &str,
+    ) -> LayoutJob {
         let mut job = LayoutJob {
             wrap: TextWrapping {
                 max_width: self.wrap,
@@ -88,7 +95,7 @@ impl JobSpec {
                 fmt.background = pal.inline_code_bg;
             }
             let start = job.text.len();
-            job.text.push_str(&span.text);
+            job.text.push_str(span.text.get(source));
             job.sections.push(LayoutSection {
                 leading_space: 0.0,
                 byte_range: ByteIndex(start)..ByteIndex(job.text.len()),
@@ -99,8 +106,8 @@ impl JobSpec {
     }
 
     /// Раскладка job через galley-кэш egui (дёшево на повторных кадрах).
-    fn galley(&self, spans: &[Span], pal: &Palette, ui: &mut Ui) -> Arc<Galley> {
-        ui.painter().layout_job(self.job(spans, pal, None))
+    fn galley(&self, spans: &[Span], pal: &Palette, ui: &mut Ui, source: &str) -> Arc<Galley> {
+        ui.painter().layout_job(self.job(spans, pal, None, source))
     }
 }
 
@@ -212,20 +219,19 @@ pub struct ImagePrep {
 
 pub fn plain_span(text: &str) -> Span {
     Span {
-        text: text.into(),
-        src: None,
+        text: crate::md::blocks::Txt::Own(text.into()),
         fmt: Default::default(),
         link: None,
     }
 }
 
 /// Смещения (в символах) начала каждого спана в тексте job.
-pub fn char_starts(spans: &[Span]) -> Vec<usize> {
+pub fn char_starts(spans: &[Span], source: &str) -> Vec<usize> {
     let mut out = Vec::with_capacity(spans.len());
     let mut acc = 0;
     for span in spans {
         out.push(acc);
-        acc += span.text.chars().count();
+        acc += span.text.get(source).chars().count();
     }
     out
 }
@@ -270,12 +276,12 @@ fn heading_after(level: u8) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Оценка высоты блока: символы / символы_в_строке × высота строки + отступы.
-pub fn estimate(block: &BlockKind, typo: &Typo, col_w: f32) -> f32 {
+pub fn estimate(block: &BlockKind, typo: &Typo, col_w: f32, source: &str) -> f32 {
     let em = typo.size;
     let rh = typo.row_height();
     let chars_per_line = ((col_w - 16.0) / (em * 0.52)).max(8.0);
     let text_h = |spans: &[Span], size: f32| {
-        let chars: usize = spans.iter().map(|s| s.text.chars().count()).sum();
+        let chars: usize = spans.iter().map(|s| s.text.get(source).chars().count()).sum();
         ((chars as f32 / chars_per_line).ceil().max(1.0) * size * typo.line_height).max(rh)
     };
     match block {
@@ -299,7 +305,7 @@ pub fn estimate(block: &BlockKind, typo: &Typo, col_w: f32) -> f32 {
             gap + text_h(spans, em)
         }
         BlockKind::Code { code, .. } => {
-            let lines = code.bytes().filter(|b| *b == b'\n').count() + 1;
+            let lines = code.get(source).bytes().filter(|b| *b == b'\n').count() + 1;
             gap_code_top(em)
                 + gap_code_bottom(em)
                 + 32.0
@@ -328,17 +334,23 @@ fn alert_colors(alert: Option<Alert>, pal: &Palette) -> (Color32, &'static str) 
 // Измерение блоков.
 // ---------------------------------------------------------------------------
 
-pub fn measure_block(ui: &mut Ui, env: &Env, col_w: f32, block: &BlockKind) -> (Prepared, f32) {
+pub fn measure_block(
+    ui: &mut Ui,
+    env: &Env,
+    col_w: f32,
+    block: &BlockKind,
+    source: &str,
+) -> (Prepared, f32) {
     match block {
         BlockKind::Heading { level, spans, .. } => {
-            measure_heading(ui, env, col_w, *level, spans)
+            measure_heading(ui, env, col_w, *level, spans, source)
         }
-        BlockKind::Paragraph { spans } => measure_paragraph(ui, env, col_w, spans),
+        BlockKind::Paragraph { spans } => measure_paragraph(ui, env, col_w, spans, source),
         BlockKind::Quote {
             depth,
             alert,
             spans,
-        } => measure_quote(ui, env, col_w, *depth, *alert, spans),
+        } => measure_quote(ui, env, col_w, *depth, *alert, spans, source),
         BlockKind::ListItem {
             indent,
             marker,
@@ -348,10 +360,10 @@ pub fn measure_block(ui: &mut Ui, env: &Env, col_w: f32, block: &BlockKind) -> (
             quote_depth,
             spans,
         } => measure_list_item(
-            ui, env, col_w, *indent, marker, *task, *cont, *loose, *quote_depth, spans,
+            ui, env, col_w, *indent, marker, *task, *cont, *loose, *quote_depth, spans, source,
         ),
-        BlockKind::Code { lang, code } => measure_code(ui, env, col_w, lang, code),
-        BlockKind::Table { aligns, rows } => measure_table(ui, env, col_w, aligns, rows),
+        BlockKind::Code { lang, code } => measure_code(ui, env, col_w, lang, code.get(source)),
+        BlockKind::Table { aligns, rows } => measure_table(ui, env, col_w, aligns, rows, source),
         BlockKind::Rule => {
             let h = 1.6 * env.typo.size + 1.0;
             (Prepared::Rule, h)
@@ -360,11 +372,18 @@ pub fn measure_block(ui: &mut Ui, env: &Env, col_w: f32, block: &BlockKind) -> (
     }
 }
 
-fn empty_text_prep(galley: Arc<Galley>, spec: JobSpec, spans: &[Span], text_pos: Vec2, height: f32) -> TextPrep {
+fn empty_text_prep(
+    galley: Arc<Galley>,
+    spec: JobSpec,
+    spans: &[Span],
+    source: &str,
+    text_pos: Vec2,
+    height: f32,
+) -> TextPrep {
     TextPrep {
         galley,
         spec,
-        total_ch: spans.iter().map(|s| s.text.chars().count()).sum(),
+        total_ch: spans.iter().map(|s| s.text.get(source).chars().count()).sum(),
         text_pos,
         height,
         alert_label: None,
@@ -381,6 +400,7 @@ fn measure_heading(
     col_w: f32,
     level: u8,
     spans: &[Span],
+    source: &str,
 ) -> (Prepared, f32) {
     let em = env.typo.size;
     let before = heading_before(level) * em;
@@ -391,9 +411,9 @@ fn measure_heading(
         bold: true,
         ..JobSpec::base(env)
     };
-    let galley = spec.galley(spans, env.pal, ui);
+    let galley = spec.galley(spans, env.pal, ui, source);
     let h = before + galley.size().y + after;
-    let mut prep = empty_text_prep(galley, spec, spans, vec2(0.0, before), h);
+    let mut prep = empty_text_prep(galley, spec, spans, source, vec2(0.0, before), h);
     if level <= 2 {
         prep.underline = Some((before + prep.galley.size().y + 0.4 * em, prep.galley.size().x));
     }
@@ -405,15 +425,16 @@ fn measure_paragraph(
     env: &Env,
     col_w: f32,
     spans: &[Span],
+    source: &str,
 ) -> (Prepared, f32) {
     let em = env.typo.size;
     let spec = JobSpec {
         wrap: col_w,
         ..JobSpec::base(env)
     };
-    let galley = spec.galley(spans, env.pal, ui);
+    let galley = spec.galley(spans, env.pal, ui, source);
     let h = 0.6 * em + galley.size().y;
-    let prep = empty_text_prep(galley, spec, spans, vec2(0.0, 0.6 * em), h);
+    let prep = empty_text_prep(galley, spec, spans, source, vec2(0.0, 0.6 * em), h);
     (Prepared::Text(prep), h)
 }
 
@@ -424,6 +445,7 @@ fn measure_quote(
     depth: u8,
     alert: Option<Alert>,
     spans: &[Span],
+    source: &str,
 ) -> (Prepared, f32) {
     let em = env.typo.size;
     let (color, label_key) = alert_colors(alert, env.pal);
@@ -435,7 +457,7 @@ fn measure_quote(
         color: if alert.is_some() { env.pal.fg } else { env.pal.muted },
         ..JobSpec::base(env)
     };
-    let galley = spec.galley(spans, env.pal, ui);
+    let galley = spec.galley(spans, env.pal, ui, source);
     let pad_v = 0.45 * em;
 
     let mut label_h = 0.0;
@@ -449,7 +471,7 @@ fn measure_quote(
             ..JobSpec::base(env)
         };
         let g = label_spec
-            .galley(&[plain_span(t(env.lang, label_key))], env.pal, ui);
+            .galley(&[plain_span(t(env.lang, label_key))], env.pal, ui, "");
         label_h = g.size().y + 0.3 * em;
         (g, vec2(indent + 12.0, gap + pad_v), color)
     });
@@ -459,6 +481,7 @@ fn measure_quote(
         galley,
         spec,
         spans,
+        source,
         vec2(indent + 12.0, gap + pad_v + label_h),
         h,
     );
@@ -485,6 +508,7 @@ fn measure_list_item(
     loose: bool,
     quote_depth: u8,
     spans: &[Span],
+    source: &str,
 ) -> (Prepared, f32) {
     let em = env.typo.size;
     let row_h = env.typo.row_height();
@@ -502,7 +526,7 @@ fn measure_list_item(
             color: env.pal.muted,
             ..JobSpec::base(env)
         };
-        Some(spec.galley(&[plain_span(&marker_text)], env.pal, ui))
+        Some(spec.galley(&[plain_span(&marker_text)], env.pal, ui, ""))
     } else {
         None
     };
@@ -521,7 +545,7 @@ fn measure_list_item(
         wrap: col_w - text_x,
         ..JobSpec::base(env)
     };
-    let galley = spec.galley(spans, env.pal, ui);
+    let galley = spec.galley(spans, env.pal, ui, source);
     let h = gap + galley.size().y.max(row_h);
 
     let first_line_cy = gap + row_h * 0.5;
@@ -539,7 +563,7 @@ fn measure_list_item(
         (None, true) => None,
     };
 
-    let mut prep = empty_text_prep(galley, spec, spans, vec2(text_x, gap), h);
+    let mut prep = empty_text_prep(galley, spec, spans, source, vec2(text_x, gap), h);
     prep.marker = marker_prep;
     (Prepared::Text(prep), h)
 }
@@ -649,6 +673,7 @@ fn measure_table(
     col_w: f32,
     aligns: &[crate::md::blocks::Align],
     rows: &[crate::md::blocks::TableRow],
+    source: &str,
 ) -> (Prepared, f32) {
     let em = env.typo.size;
     let cell = JobSpec {
@@ -666,7 +691,7 @@ fn measure_table(
         let mut spec = cell.clone();
         spec.bold = ri == 0;
         for (ci, cell_spans) in row.cells.iter().enumerate() {
-            let job = spec.job(cell_spans, env.pal, None);
+            let job = spec.job(cell_spans, env.pal, None, source);
             let w = ui.painter().layout_job(job).size().x;
             if ci < cols.len() {
                 cols[ci] = cols[ci].max(w);
@@ -743,7 +768,7 @@ fn measure_image(
         wrap: w - 100.0,
         ..JobSpec::base(env)
     };
-    let galley = spec.galley(&[plain_span(&label)], env.pal, ui);
+    let galley = spec.galley(&[plain_span(&label)], env.pal, ui, "");
     let h = 0.6 * em + 84.0;
     let prep = ImagePrep {
         label: galley,

@@ -76,7 +76,7 @@ pub enum BlockKind {
     Code {
         /// Язык из fence (первый токен); None для отступных блоков.
         lang: Option<String>,
-        code: String,
+        code: Txt,
     },
     Table {
         aligns: Vec<Align>,
@@ -119,12 +119,29 @@ pub enum Alert {
     Caution,
 }
 
+/// Текст фрагмента: диапазон в `Doc::source` (обычный случай — текст не
+/// дублируется в памяти) или собственная строка (синтезированные и
+/// декодированные: сущности `&amp;`, softbreak, inline HTML, CRLF-код).
+#[derive(Clone, Debug)]
+pub enum Txt {
+    Src(Range<usize>),
+    Own(String),
+}
+
+impl Txt {
+    /// Текст фрагмента в контексте исходника документа.
+    pub fn get<'a>(&'a self, source: &'a str) -> &'a str {
+        match self {
+            Txt::Src(r) => &source[r.clone()],
+            Txt::Own(s) => s.as_str(),
+        }
+    }
+}
+
 /// Inline-фрагмент текста с форматированием.
 #[derive(Clone, Debug)]
 pub struct Span {
-    pub text: String,
-    /// Диапазон в `Doc::source` (нет для синтезированных: перевод строки, сущности).
-    pub src: Option<Range<usize>>,
+    pub text: Txt,
     pub fmt: Fmt,
     /// URL ссылки, если спан внутри `[…](…)`.
     pub link: Option<Box<str>>,
@@ -149,6 +166,7 @@ pub const ANCHOR_LEN: usize = 64;
 /// изменения файла (индексы блоков при перечитывании плывут). None — блок
 /// без текста (разделитель).
 pub fn text_prefix(doc: &Doc, i: usize) -> Option<String> {
+    let source = doc.source.as_ref();
     let mut out = String::new();
     let mut add = |s: &str| {
         if out.chars().count() < ANCHOR_LEN {
@@ -162,14 +180,14 @@ pub fn text_prefix(doc: &Doc, i: usize) -> Option<String> {
         | BlockKind::Quote { spans, .. }
         | BlockKind::ListItem { spans, .. } => {
             for s in spans {
-                add(&s.text);
+                add(s.text.get(source));
             }
         }
-        BlockKind::Code { code, .. } => add(code),
+        BlockKind::Code { code, .. } => add(code.get(source)),
         BlockKind::Table { rows, .. } => {
             if let Some(cell) = rows.first().and_then(|r| r.cells.first()) {
                 for s in cell {
-                    add(&s.text);
+                    add(s.text.get(source));
                 }
             }
         }

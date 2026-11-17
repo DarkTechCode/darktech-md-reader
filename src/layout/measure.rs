@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use eframe::egui::{self, pos2, vec2, Color32, FontFamily, FontId, Rect, Ui, Vec2};
+use eframe::egui::{self, pos2, vec2, Align, Color32, FontFamily, FontId, Rect, Ui, Vec2};
 use eframe::egui::epaint::text::VariationCoords;
 use eframe::egui::text::{
     ByteIndex, Galley, LayoutJob, LayoutSection, TextFormat, TextWrapping,
@@ -13,6 +13,7 @@ use eframe::egui::text::{
 use crate::fonts;
 use crate::i18n::t;
 use crate::md::blocks::{Alert, BlockKind, ListMarker, Span};
+use crate::settings::model::TextAlign;
 
 use crate::view::themes::{heading_ratio, Palette, Typo};
 use crate::view::Env;
@@ -27,6 +28,11 @@ pub struct JobSpec {
     pub wrap: f32,
     pub line_height: f32,
     pub letter_spacing: f32,
+    /// Горизонтальное выравнивание строк в галлее (настройка «Выравнивание»;
+    /// LEFT/false — таблицы, код, маркеры, подписи).
+    pub halign: Align,
+    /// Растягивать перенесённые строки до `wrap` («по ширине»).
+    pub justify: bool,
 }
 
 impl JobSpec {
@@ -40,6 +46,28 @@ impl JobSpec {
             wrap: f32::INFINITY,
             line_height: typo.row_height(),
             letter_spacing: typo.letter_spacing,
+            halign: Align::LEFT,
+            justify: false,
+        }
+    }
+
+    /// Спецификация текстового блока (абзац/заголовок/цитата/пункт списка)
+    /// с выравниванием из настроек.
+    fn text(base: JobSpec, align: TextAlign) -> Self {
+        let (halign, justify) = match align {
+            TextAlign::Left => (Align::LEFT, false),
+            TextAlign::Center => (Align::Center, false),
+            TextAlign::Justify => (Align::LEFT, true),
+        };
+        Self { halign, justify, ..base }
+    }
+
+    /// Смещение центрированного текста внутри области раскладки.
+    fn center_off(align: TextAlign, wrap: f32, galley_w: f32) -> f32 {
+        if align == TextAlign::Center {
+            ((wrap - galley_w).max(0.0)) * 0.5
+        } else {
+            0.0
         }
     }
 
@@ -58,6 +86,8 @@ impl JobSpec {
                 max_width: self.wrap,
                 ..Default::default()
             },
+            halign: self.halign,
+            justify: self.justify,
             ..Default::default()
         };
         for span in spans {
@@ -405,15 +435,19 @@ fn measure_heading(
     let em = env.typo.size;
     let before = heading_before(level) * em;
     let after = heading_after(level) * em;
-    let spec = JobSpec {
-        size: em * heading_ratio(level),
-        wrap: col_w,
-        bold: true,
-        ..JobSpec::base(env)
-    };
+    let spec = JobSpec::text(
+        JobSpec {
+            size: em * heading_ratio(level),
+            wrap: col_w,
+            bold: true,
+            ..JobSpec::base(env)
+        },
+        env.text_align,
+    );
     let galley = spec.galley(spans, env.pal, ui, source);
     let h = before + galley.size().y + after;
-    let mut prep = empty_text_prep(galley, spec, spans, source, vec2(0.0, before), h);
+    let x_off = JobSpec::center_off(env.text_align, col_w, galley.size().x);
+    let mut prep = empty_text_prep(galley, spec, spans, source, vec2(x_off, before), h);
     if level <= 2 {
         prep.underline = Some((before + prep.galley.size().y + 0.4 * em, prep.galley.size().x));
     }
@@ -428,13 +462,17 @@ fn measure_paragraph(
     source: &str,
 ) -> (Prepared, f32) {
     let em = env.typo.size;
-    let spec = JobSpec {
-        wrap: col_w,
-        ..JobSpec::base(env)
-    };
+    let spec = JobSpec::text(
+        JobSpec {
+            wrap: col_w,
+            ..JobSpec::base(env)
+        },
+        env.text_align,
+    );
     let galley = spec.galley(spans, env.pal, ui, source);
     let h = 0.6 * em + galley.size().y;
-    let prep = empty_text_prep(galley, spec, spans, source, vec2(0.0, 0.6 * em), h);
+    let x_off = JobSpec::center_off(env.text_align, col_w, galley.size().x);
+    let prep = empty_text_prep(galley, spec, spans, source, vec2(x_off, 0.6 * em), h);
     (Prepared::Text(prep), h)
 }
 
@@ -452,11 +490,14 @@ fn measure_quote(
     let indent = 14.0 * depth as f32;
     let gap = if alert.is_some() { 0.7 } else { 0.45 } * em;
     let text_w = col_w - indent - 12.0;
-    let spec = JobSpec {
-        wrap: text_w,
-        color: if alert.is_some() { env.pal.fg } else { env.pal.muted },
-        ..JobSpec::base(env)
-    };
+    let spec = JobSpec::text(
+        JobSpec {
+            wrap: text_w,
+            color: if alert.is_some() { env.pal.fg } else { env.pal.muted },
+            ..JobSpec::base(env)
+        },
+        env.text_align,
+    );
     let galley = spec.galley(spans, env.pal, ui, source);
     let pad_v = 0.45 * em;
 
@@ -477,12 +518,13 @@ fn measure_quote(
     });
 
     let h = gap + pad_v * 2.0 + galley.size().y + label_h;
+    let x_off = JobSpec::center_off(env.text_align, text_w, galley.size().x);
     let mut prep = empty_text_prep(
         galley,
         spec,
         spans,
         source,
-        vec2(indent + 12.0, gap + pad_v + label_h),
+        vec2(indent + 12.0 + x_off, gap + pad_v + label_h),
         h,
     );
     if alert.is_some() {
@@ -541,10 +583,14 @@ fn measure_list_item(
     };
 
     let text_x = indent_px + marker_w;
-    let spec = JobSpec {
-        wrap: col_w - text_x,
-        ..JobSpec::base(env)
-    };
+    let text_wrap = col_w - text_x;
+    let spec = JobSpec::text(
+        JobSpec {
+            wrap: text_wrap,
+            ..JobSpec::base(env)
+        },
+        env.text_align,
+    );
     let galley = spec.galley(spans, env.pal, ui, source);
     let h = gap + galley.size().y.max(row_h);
 
@@ -563,7 +609,8 @@ fn measure_list_item(
         (None, true) => None,
     };
 
-    let mut prep = empty_text_prep(galley, spec, spans, source, vec2(text_x, gap), h);
+    let x_off = JobSpec::center_off(env.text_align, text_wrap, galley.size().x);
+    let mut prep = empty_text_prep(galley, spec, spans, source, vec2(text_x + x_off, gap), h);
     prep.marker = marker_prep;
     (Prepared::Text(prep), h)
 }

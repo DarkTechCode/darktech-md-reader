@@ -14,6 +14,7 @@ pub mod widgets;
 pub mod welcome;
 
 use crate::i18n::Lang;
+use crate::settings::model::TextAlign;
 use themes::{Palette, Typo};
 
 /// Контекст отрисовки одного кадра.
@@ -21,6 +22,8 @@ pub struct Env<'a> {
     pub pal: &'a Palette,
     pub typo: &'a Typo,
     pub lang: Lang,
+    /// Выравнивание текста (текстовые блоки; таблицы/код — свои).
+    pub text_align: TextAlign,
     /// Растягивать текст на всю ширину окна (игнорирует typo.width).
     pub fit_width: bool,
     /// Выравнивать ячейки таблиц по верхнему краю (иначе по центру).

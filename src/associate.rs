@@ -1,9 +1,18 @@
-//! Ассоциация `.md` с DarkTechMD (только HKCU — без прав администратора).
-//! Кнопка в настройках, off по умолчанию (PLAN §9). Прежний обработчик `.md`
-//! запоминается и восстанавливается при отключении.
+//! Ассоциация расширений (`.md`, `.txt`) с DarkTechMD — только HKCU, без
+//! прав администратора. Чекбоксы в настройках; прежний обработчик
+//! расширения запоминается и восстанавливается при отключении.
 
-/// ProgID нашей ассоциации в HKCU\Software\Classes.
-pub const PROG_ID: &str = "DarkTechMD.md";
+/// Ассоциируемые расширения (без точки) — чекбоксы в настройках.
+pub const EXTENSIONS: [&str; 2] = ["md", "txt"];
+
+/// Отображаемое имя типа документа для расширения.
+fn doc_name(ext: &str) -> String {
+    match ext {
+        "md" => "Документ Markdown (DarkTechMD)".to_string(),
+        "txt" => "Текстовый документ (DarkTechMD)".to_string(),
+        other => format!("{other} (DarkTechMD)"),
+    }
+}
 
 #[cfg(windows)]
 mod imp {
@@ -13,9 +22,9 @@ mod imp {
         RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE,
         REG_OPTION_NON_VOLATILE, REG_SZ,
     };
-    use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_FLUSH, SHCNF_IDLIST};
-
-    use super::PROG_ID;
+    use windows_sys::Win32::UI::Shell::{
+        SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNF_FLUSH, SHCNF_IDLIST,
+    };
 
     const CLASSES: &str = "Software\\Classes";
 
@@ -31,9 +40,18 @@ mod imp {
         }
     }
 
+    fn prog_id(ext: &str) -> String {
+        format!("DarkTechMD.{ext}")
+    }
+
     /// Открыть (или создать) подраздел HKCU\Software\Classes\<sub>.
     fn open_key(sub: &str, create: bool) -> Result<HKEY, String> {
-        let path = wide(&format!("{CLASSES}\\{sub}"));
+        open_hkcu(&format!("{CLASSES}\\{sub}"), create)
+    }
+
+    /// Открыть (или создать) раздел по полному пути от HKCU.
+    fn open_hkcu(path: &str, create: bool) -> Result<HKEY, String> {
+        let path = wide(path);
         let mut hk = std::ptr::null_mut();
         let code = unsafe {
             if create {
@@ -61,9 +79,7 @@ mod imp {
         let data = wide(value);
         let bytes = (data.len() * 2) as u32;
         check(
-            unsafe {
-                RegSetValueExW(hk, name.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), bytes)
-            },
+            unsafe { RegSetValueExW(hk, name.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), bytes) },
             "запись значения",
         )
     }
@@ -73,14 +89,28 @@ mod imp {
         let name = wide(name.unwrap_or(""));
         let mut len = 0u32;
         let code = unsafe {
-            RegQueryValueExW(hk, name.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), &mut len)
+            RegQueryValueExW(
+                hk,
+                name.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut len,
+            )
         };
         if code != ERROR_SUCCESS || len == 0 {
             return None;
         }
         let mut buf = vec![0u8; len as usize];
         let code = unsafe {
-            RegQueryValueExW(hk, name.as_ptr(), std::ptr::null(), std::ptr::null_mut(), buf.as_mut_ptr(), &mut len)
+            RegQueryValueExW(
+                hk,
+                name.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                &mut len,
+            )
         };
         if code != ERROR_SUCCESS {
             return None;
@@ -107,13 +137,18 @@ mod imp {
 
     fn notify_shell() {
         unsafe {
-            SHChangeNotify(SHCNE_ASSOCCHANGED as i32, SHCNF_IDLIST | SHCNF_FLUSH, std::ptr::null(), std::ptr::null());
+            SHChangeNotify(
+                SHCNE_ASSOCCHANGED as i32,
+                SHCNF_IDLIST | SHCNF_FLUSH,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
         }
     }
 
-    /// Ассоциирован ли `.md` с этим exe (наш ProgID и наша команда).
-    pub fn is_associated() -> bool {
-        let Ok(hk) = open_key(&format!("{PROG_ID}\\shell\\open\\command"), false) else {
+    /// Ассоциировано ли расширение с этим exe (наш ProgID и наша команда).
+    pub fn is_associated(ext: &str) -> bool {
+        let Ok(hk) = open_key(&format!("{}\\shell\\open\\command", prog_id(ext)), false) else {
             return false;
         };
         let cmd = get_str(hk, None);
@@ -121,46 +156,60 @@ mod imp {
         cmd.as_deref() == Some(expected_command().as_str())
     }
 
-    /// Сделать DarkTechMD обработчиком `.md` (HKCU). Прежний обработчик
+    /// Назначенный Windows обработчик расширения (UserChoice в FileExts),
+    /// если это НЕ DarkTechMD: тогда проводник открывает его, игнорируя нашу
+    /// ассоциацию. UserChoice защищён подписью — сменить можно только в
+    /// системных настройках («Приложения по умолчанию»).
+    pub fn foreign_default(ext: &str) -> Option<String> {
+        let path = format!(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.{ext}\\UserChoice"
+        );
+        let hk = open_hkcu(&path, false).ok()?;
+        let prog = get_str(hk, Some("ProgId"));
+        unsafe { RegCloseKey(hk) };
+        prog.filter(|p| p != &prog_id(ext))
+    }
+
+    /// Сделать DarkTechMD обработчиком расширения (HKCU). Прежний обработчик
     /// запоминается в значении PrevProgId и вернётся при отключении.
-    pub fn associate() -> Result<(), String> {
-        let hk_md = open_key(".md", true)?;
-        let prev = get_str(hk_md, None).filter(|p| p != PROG_ID);
-        let hk_ours = open_key(PROG_ID, true)?;
+    pub fn associate(ext: &str) -> Result<(), String> {
+        let prog = prog_id(ext);
+        let hk_ext = open_key(&format!(".{ext}"), true)?;
+        let prev = get_str(hk_ext, None).filter(|p| p != &prog);
+        let hk_ours = open_key(&prog, true)?;
+        let icon = {
+            let exe = std::env::current_exe().unwrap_or_default();
+            format!("{},0", exe.display())
+        };
         let result = (|| {
             if let Some(p) = &prev {
                 set_str(hk_ours, Some("PrevProgId"), p)?;
             } else {
                 let _ = delete_value(hk_ours, Some("PrevProgId"));
             }
-            set_str(hk_ours, None, "Документ Markdown (DarkTechMD)")?;
-            set_str(hk_ours, Some("DefaultIcon"), &icon_value())?;
-            let hk_cmd = open_key(&format!("{PROG_ID}\\shell\\open\\command"), true)?;
+            set_str(hk_ours, None, &super::doc_name(ext))?;
+            set_str(hk_ours, Some("DefaultIcon"), &icon)?;
+            let hk_cmd = open_key(&format!("{prog}\\shell\\open\\command"), true)?;
             let r = set_str(hk_cmd, None, &expected_command());
             unsafe { RegCloseKey(hk_cmd) };
             r?;
-            set_str(hk_md, None, PROG_ID)
+            set_str(hk_ext, None, &prog)
         })();
         unsafe {
             RegCloseKey(hk_ours);
-            RegCloseKey(hk_md);
+            RegCloseKey(hk_ext);
         }
         result?;
         notify_shell();
         Ok(())
     }
 
-    /// Значение DefaultIcon: «путь,0» — иконка из ресурсов exe (winres).
-    fn icon_value() -> String {
-        let exe = std::env::current_exe().unwrap_or_default();
-        format!("{},0", exe.display())
-    }
-
-    /// Убрать ассоциацию: вернуть прежний обработчик `.md` (или удалить
+    /// Убрать ассоциацию расширения: вернуть прежний обработчик (или удалить
     /// наш), удалить наш ProgID-ключ.
-    pub fn remove() -> Result<(), String> {
+    pub fn remove(ext: &str) -> Result<(), String> {
+        let prog = prog_id(ext);
         // Прежний обработчик — до удаления ключа.
-        let prev = open_key(PROG_ID, false)
+        let prev = open_key(&prog, false)
             .ok()
             .and_then(|hk| {
                 let p = get_str(hk, Some("PrevProgId"));
@@ -168,48 +217,52 @@ mod imp {
                 p
             });
         check(
-            unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, wide(&format!("{CLASSES}\\{PROG_ID}")).as_ptr()) },
+            unsafe {
+                RegDeleteTreeW(
+                    HKEY_CURRENT_USER,
+                    wide(&format!("{CLASSES}\\{prog}")).as_ptr(),
+                )
+            },
             "удаление раздела ассоциации",
         )?;
-        if is_ours_md_default() {
-            let hk_md = open_key(".md", true)?;
-            let r = match prev {
-                Some(p) => set_str(hk_md, None, &p),
-                None => delete_value(hk_md, None),
-            };
-            unsafe { RegCloseKey(hk_md) };
-            r?;
-        }
-        notify_shell();
-        Ok(())
-    }
-
-    /// Default-значение `.md` указывает на наш ProgID.
-    fn is_ours_md_default() -> bool {
-        open_key(".md", false)
+        // Default-значение .<ext> указывает на наш ProgID?
+        let ours = open_key(&format!(".{ext}"), false)
             .ok()
             .and_then(|hk| {
                 let v = get_str(hk, None);
                 unsafe { RegCloseKey(hk) };
                 v
             })
-            .as_deref()
-            == Some(PROG_ID)
+            .is_some_and(|v| v == prog);
+        if ours {
+            let hk_ext = open_key(&format!(".{ext}"), true)?;
+            let r = match prev {
+                Some(p) => set_str(hk_ext, None, &p),
+                None => delete_value(hk_ext, None),
+            };
+            unsafe { RegCloseKey(hk_ext) };
+            r?;
+        }
+        notify_shell();
+        Ok(())
     }
 }
 
 #[cfg(windows)]
-pub use imp::{associate, is_associated, remove};
+pub use imp::{associate, foreign_default, is_associated, remove};
 
 #[cfg(not(windows))]
 mod imp {
-    pub fn is_associated() -> bool {
+    pub fn is_associated(_ext: &str) -> bool {
         false
     }
-    pub fn associate() -> Result<(), String> {
+    pub fn foreign_default(_ext: &str) -> Option<String> {
+        None
+    }
+    pub fn associate(_ext: &str) -> Result<(), String> {
         Err("ассоциация файлов поддерживается только на Windows".into())
     }
-    pub fn remove() -> Result<(), String> {
+    pub fn remove(_ext: &str) -> Result<(), String> {
         Err("ассоциация файлов поддерживается только на Windows".into())
     }
 }

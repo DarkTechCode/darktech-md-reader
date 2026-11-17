@@ -56,6 +56,9 @@ pub struct App {
     title_sent: String,
     /// Отложенная запись настроек (последнее изменение + SAVE_DELAY).
     save_after: Option<Instant>,
+    /// Окно стартует невидимым (main.rs): показать после применения темы
+    /// титульной строки — в первом кадре.
+    first_frame: bool,
 }
 
 /// Открытое контекст-меню документа: позиция и ссылка под кликом.
@@ -279,6 +282,7 @@ impl App {
             next_tab_id: next_id + 1,
             title_sent: String::new(),
             save_after: None,
+            first_frame: true,
         };
         // Синхронно готовые вкладки: вооружить восстановление позиций.
         let ctx = app.egui_ctx.clone();
@@ -654,16 +658,19 @@ impl App {
         }
     }
 
-    /// Клик по ссылке в документе: веб — в системный браузер, локальный .md —
-    /// новой вкладкой (путь относительно текущего файла).
+    /// Клик по ссылке в документе: веб — в системный браузер, локальный
+    /// текстовый файл (.md/.txt) — новой вкладкой (путь относительно текущего).
     fn open_link(&mut self, url: &str, ctx: &Context) {
         let lower = url.to_ascii_lowercase();
+        let is_text_doc = [".md", ".markdown", ".mdown", ".txt", ".text"]
+            .iter()
+            .any(|e| lower.ends_with(e));
         if lower.starts_with("http://")
             || lower.starts_with("https://")
             || lower.starts_with("mailto:")
         {
             ctx.open_url(egui::OpenUrl::new_tab(url));
-        } else if lower.ends_with(".md") || lower.ends_with(".markdown") {
+        } else if is_text_doc {
             let base = self
                 .tabs
                 .get(self.active)
@@ -858,8 +865,14 @@ impl App {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "document.md".to_string());
+        // Фильтр — по расширению исходного файла (любого, не только .md).
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("md")
+            .to_string();
         let Some(dst) = rfd::FileDialog::new()
-            .add_filter("Markdown", &["md", "markdown", "mdown"])
+            .add_filter("Документ", &[ext])
             .set_file_name(&name)
             .save_file()
         else {
@@ -879,7 +892,7 @@ impl App {
     fn handle_input(&mut self, ctx: &Context) {
         // Ctrl+O — диалог выбора файла.
         if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::O)) {
-            if let Some(path) = pick_md_file() {
+            if let Some(path) = pick_text_file() {
                 self.open(path);
             }
         }
@@ -1068,21 +1081,13 @@ impl App {
             }
         }
 
-        // Drag&drop файлов.
+        // Drag&drop файлов: любые (текст читается как есть; бинарник покажет
+        // экран «не UTF-8» — как и при выборе «Все файлы» в диалоге).
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| Some(f.path().to_path_buf()))
-                .filter(|p| {
-                    matches!(
-                        p.extension()
-                            .and_then(|e| e.to_str())
-                            .map(|e| e.to_ascii_lowercase())
-                            .as_deref(),
-                        Some("md" | "markdown" | "mdown")
-                    )
-                })
+                .map(|f| f.path().to_path_buf())
                 .collect()
         });
         for path in dropped {
@@ -1222,9 +1227,10 @@ fn apply_theme(ctx: &Context, mode: ThemeMode, dark: bool) {
     }));
 }
 
-fn pick_md_file() -> Option<PathBuf> {
+fn pick_text_file() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .add_filter("Markdown", &["md", "markdown", "mdown"])
+        .add_filter("Markdown и текст", &["md", "markdown", "mdown", "txt", "text"])
+        .add_filter("Все файлы", &["*"])
         .pick_file()
 }
 
@@ -1280,6 +1286,19 @@ impl eframe::App for App {
             themes::apply(&ctx);
         }
 
+        // Окно стартует невидимым: теперь титульная строка окрашена нашей
+        // темой (SetTheme из App::new применён) — показываем. Повторная
+        // команда темы страхует от потери при холодном старте окна.
+        if self.first_frame {
+            self.first_frame = false;
+            ctx.send_viewport_cmd(ViewportCommand::SetTheme(if eff {
+                egui::SystemTheme::Dark
+            } else {
+                egui::SystemTheme::Light
+            }));
+            ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+        }
+
         self.handle_input(&ctx);
         self.pump_tabs(&ctx);
         self.pump_find(&ctx);
@@ -1291,6 +1310,24 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 tab_strip(ui, self);
             });
+
+        // Статус-бар — сразу после таб-бара, ДО боковых панелей: он занимает
+        // всю ширину окна, оглавление/миникарта/настройки — над ним (иначе
+        // бар обрезался панелями и его граница вылезала при ресайзе).
+        let has_doc = matches!(
+            self.tabs.get(self.active).map(|t| &t.state),
+            Some(TabState::Ready(_)) | Some(TabState::Loading { .. })
+        );
+        if has_doc {
+            let pal = self.pal();
+            egui::Panel::bottom("status_bar")
+                .resizable(false)
+                .exact_size(26.0)
+                .frame(Frame::NONE.fill(pal.code_bg))
+                .show(ui, |ui| {
+                    status_bar(ui, self);
+                });
+        }
 
         if self.show_settings {
             let lang = self.lang();
@@ -1380,22 +1417,6 @@ impl eframe::App for App {
             self.settings.minimap_width = mm_w;
         }
 
-        // Статус-бар: статистика документа + выделение + тумблеры панелей.
-        let has_doc = matches!(
-            self.tabs.get(self.active).map(|t| &t.state),
-            Some(TabState::Ready(_)) | Some(TabState::Loading { .. })
-        );
-        if has_doc {
-            let pal = self.pal();
-            egui::Panel::bottom("status_bar")
-                .resizable(false)
-                .exact_size(26.0)
-                .frame(Frame::NONE.fill(pal.code_bg))
-                .show(ui, |ui| {
-                    status_bar(ui, self);
-                });
-        }
-
         let pal = self.pal();
         let typo = self.settings.typo();
         let lang = self.lang();
@@ -1404,6 +1425,7 @@ impl eframe::App for App {
             pal,
             typo: &typo,
             lang,
+            text_align: self.settings.text_align,
             fit_width: self.settings.fit_width,
             table_top: self.settings.table_top,
             table_scroll: self.settings.table_scroll,
@@ -1483,7 +1505,7 @@ impl eframe::App for App {
         }
         match welcome_action {
             Some(welcome::Action::Dialog) => {
-                if let Some(path) = pick_md_file() {
+                if let Some(path) = pick_text_file() {
                     self.open(path);
                 }
             }
@@ -1722,7 +1744,7 @@ fn tab_strip(ui: &mut Ui, app: &mut App) {
             TabAction::Select(i) => app.active = i,
             TabAction::Close(i) => app.close_tab(i),
             TabAction::NewTab => {
-                if let Some(path) = pick_md_file() {
+                if let Some(path) = pick_text_file() {
                     app.open(path);
                 }
             }
@@ -1856,7 +1878,7 @@ fn status_bar(ui: &mut Ui, app: &mut App) {
             );
         }
 
-        // Тумблеры справа: оглавление · миникарта · «по ширине окна».
+        // Тумблеры справа: тема · оглавление · миникарта · «по ширине окна».
         // Состояние — текстом («вкл/выкл»), без смены цвета плашки.
         // Правый край — с запасом от угла ресайза окна.
         const GAP: f32 = 8.0;
@@ -1865,20 +1887,21 @@ fn status_bar(ui: &mut Ui, app: &mut App) {
             app.minimap_visible(ui.ctx()),
             app.settings.fit_width,
         ];
-        let labels: Vec<String> = [
-            t(lang, "st_outline"),
-            t(lang, "st_minimap"),
-            t(lang, "st_fit_width"),
-        ]
-        .iter()
-        .zip(states)
-        .map(|(l, on)| format!("{l} {}", t(lang, if on { "sb_on" } else { "sb_off" })))
-        .collect();
+        // Первый тумблер — быстрый переключатель темы (подпись = текущая).
+        let mut labels = vec![t(lang, if app.dark { "st_dark" } else { "st_light" }).to_string()];
+        labels.extend(
+            [t(lang, "st_outline"), t(lang, "st_minimap"), t(lang, "st_fit_width")]
+                .iter()
+                .zip(states)
+                .map(|(l, on)| {
+                    format!("{l} {}", t(lang, if on { "sb_on" } else { "sb_off" }))
+                }),
+        );
         let widths: Vec<f32> = labels
             .iter()
             .map(|l| crate::view::widgets::plain_galley(ui, l, em, pal.fg).size().x + 18.0)
             .collect();
-        let total: f32 = widths.iter().sum::<f32>() + GAP * 2.0;
+        let total: f32 = widths.iter().sum::<f32>() + GAP * (labels.len() as f32 - 1.0);
         let lead = (ui.available_width() - total - 25.0).max(0.0);
         ui.add_space(lead);
 
@@ -1892,9 +1915,18 @@ fn status_bar(ui: &mut Ui, app: &mut App) {
             }
         }
         match clicked {
-            Some(0) => app.toggle_toc(),
-            Some(1) => app.toggle_minimap(ui.ctx()),
-            Some(2) => app.settings.fit_width = !app.settings.fit_width,
+            // Тема: переключить на противоположную эффективной (System
+            // заменяется явной — как тумблеры панелей).
+            Some(0) => {
+                app.settings.theme = if app.dark {
+                    model::ThemeMode::Light
+                } else {
+                    model::ThemeMode::Dark
+                };
+            }
+            Some(1) => app.toggle_toc(),
+            Some(2) => app.toggle_minimap(ui.ctx()),
+            Some(3) => app.settings.fit_width = !app.settings.fit_width,
             _ => {}
         }
     });

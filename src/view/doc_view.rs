@@ -133,6 +133,7 @@ pub fn show(
                 lang: env.lang,
                 code_nums: env.code_line_numbers,
                 table_scroll: env.table_scroll,
+                text_align: env.text_align,
             },
         );
 
@@ -202,7 +203,10 @@ pub fn show(
             ui,
             doc,
             &frame.regions,
-            ui.max_rect(),
+            // Область мыши документа — видимый ВЬЮПОРТ (vis), не max_rect:
+            // контент скролла выше/ниже вьюпорта накрыл бы таб-бар и
+            // статус-бар (I-beam и клики по ним у документа).
+            vis,
             frame.sel,
             frame.link_hover,
             &mut events,

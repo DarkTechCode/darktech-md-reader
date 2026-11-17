@@ -145,6 +145,7 @@ fn open_1mb_first_screen_under_100ms() {
             lang: darktech_md::i18n::Lang::Ru,
             code_nums: false,
             table_scroll: true,
+            text_align: darktech_md::settings::model::TextAlign::Left,
         },
     );
     let dt = t0.elapsed();
@@ -169,6 +170,7 @@ fn layout_state_visible_range_and_anchor() {
         lang: darktech_md::i18n::Lang::Ru,
         code_nums: false,
         table_scroll: true,
+        text_align: darktech_md::settings::model::TextAlign::Left,
     };
     let mut layout = LayoutState::default();
     layout.ensure(&doc, key);

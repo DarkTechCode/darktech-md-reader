@@ -134,6 +134,17 @@ fn path_key(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+/// Выравнивание текстового содержимого (абзацы/заголовки/цитаты/списки;
+/// таблицы — своими align-ами, код — моно без переноса).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    /// По ширине колонки (перенесённые строки растягиваются).
+    Justify,
+}
+
 /// Все настройки приложения. Дефолты — план §4.9; шрифт по умолчанию Sans —
 /// просьба владельца (осознанное отклонение от Serif в плане).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -152,6 +163,8 @@ pub struct SettingsData {
     pub letter_spacing: f32,
     /// Размер шрифта интерфейса, px.
     pub ui_font_size: u8,
+    /// Выравнивание текста (влияет только на текстовые блоки).
+    pub text_align: TextAlign,
     /// Растягивать текст на всю ширину окна (тумблер в статус-баре).
     pub fit_width: bool,
     /// Выравнивать содержимое ячеек таблиц по верхнему краю (иначе по центру).
@@ -190,6 +203,7 @@ impl Default for SettingsData {
             text_width: WIDTH_PRESETS[1],
             letter_spacing: 0.0,
             ui_font_size: UI_FONT_DEFAULT,
+            text_align: TextAlign::Left,
             fit_width: false,
             table_top: false,
             table_scroll: true,

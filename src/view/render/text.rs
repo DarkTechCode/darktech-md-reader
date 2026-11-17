@@ -80,8 +80,10 @@ pub fn render_text(
         None => {}
     }
     if let Some((y, w)) = prep.underline {
+        // От начала ТЕКСТА заголовка (при центрировании он смещён).
+        let x0 = o.x + prep.text_pos.x;
         painter.line_segment(
-            [pos2(o.x, o.y + y), pos2(o.x + w, o.y + y)],
+            [pos2(x0, o.y + y), pos2(x0 + w, o.y + y)],
             Stroke::new(1.0, env.pal.border),
         );
     }
@@ -129,6 +131,11 @@ pub fn place_text(ui: &mut Ui, pal: &Palette, p: Place<'_>, f: &mut SelFrame) ->
         f.sel.drag_focus(raw, unit);
     }
 
+    // Начало координат галлея на экране (rect — визуальные границы): у
+    // halign=Center строки лежат в [-w/2, +w/2] вокруг нуля, красим от
+    // центра строк, как Label egui (center_top).
+    let origin = p.rect.min - p.galley.rect.min.to_vec2();
+
     // Ссылка под курсором: прямоугольник каждого ссылочного спана —
     // объединение курсоров начала/конца.
     let mut hover: Option<(String, Rect)> = None;
@@ -144,7 +151,7 @@ pub fn place_text(ui: &mut Ui, pal: &Palette, p: Place<'_>, f: &mut SelFrame) ->
                 .galley
                 .pos_from_cursor(CCursor::new(cs))
                 .union(p.galley.pos_from_cursor(CCursor::new(ce)))
-                .translate(p.rect.min.to_vec2());
+                .translate(origin.to_vec2());
             if r.contains(pos) {
                 hover = Some((url.to_string(), r));
                 break;
@@ -186,7 +193,7 @@ pub fn place_text(ui: &mut Ui, pal: &Palette, p: Place<'_>, f: &mut SelFrame) ->
         }
     }
     let painter = ui.painter().clone();
-    painter.galley(p.rect.min, galley, pal.fg);
+    painter.galley(origin, galley, pal.fg);
 
     let mut events = Vec::new();
     if let Some((url, r)) = &hover {

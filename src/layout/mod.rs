@@ -7,6 +7,7 @@ pub mod measure;
 
 use crate::i18n::Lang;
 use crate::md::blocks::Doc;
+use crate::settings::model::TextAlign;
 use crate::view::themes::Typo;
 
 use cache::BlockCache;
@@ -25,6 +26,8 @@ pub struct LayoutKey {
     pub code_nums: bool,
     /// Горизонтальный скролл в таблицах (меняет ширины колонок и высоту).
     pub table_scroll: bool,
+    /// Выравнивание текста (строки в галлеях раскладываются иначе).
+    pub text_align: TextAlign,
 }
 
 /// Высоты блоков + префикс-суммы + кэш готовых к отрисовке блоков.

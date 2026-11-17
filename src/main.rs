@@ -36,12 +36,15 @@ fn main() -> eframe::Result {
 
 /// Окно из сессии: позиция — только если попадает на существующий монитор
 /// (после смены мониторов окно не должно оказаться за экраном), размер —
-/// нормальный (не развёрнутый). Координаты — поинты egui.
+/// нормальный (не развёрнутый). Координаты — поинты egui. Окно создаётся
+/// НЕВИДИМЫМ: первый кадр успевает применить тему титульной строки — окно
+/// показывается сразу с правильным заголовком (без светлого мигания).
 fn viewport_builder(s: &SettingsData) -> eframe::egui::ViewportBuilder {
     let ses = &s.session;
     let mut vb = eframe::egui::ViewportBuilder::default()
         .with_title("DarkTechMD")
-        .with_min_inner_size([560.0, 380.0]);
+        .with_min_inner_size([560.0, 380.0])
+        .with_visible(false);
     if ses.win_maximized {
         vb = vb.with_maximized(true);
     }

@@ -10,12 +10,12 @@ use eframe::egui::{pos2, vec2, CornerRadius, Rect, Sense, Stroke, Ui};
 
 use crate::i18n::{t, Lang};
 use crate::settings::model::{
-    SettingsData, LangMode, PanelMode, Side, ThemeMode, FONT_MAX, FONT_MIN, LETTER_MAX, LETTER_MIN,
-    LETTER_STEP, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_HEIGHT_STEP, TOC_LEVEL_MAX,
+    SettingsData, LangMode, PanelMode, Side, TextAlign, ThemeMode, FONT_MAX, FONT_MIN, LETTER_MAX,
+    LETTER_MIN, LETTER_STEP, LINE_HEIGHT_MAX, LINE_HEIGHT_MIN, LINE_HEIGHT_STEP, TOC_LEVEL_MAX,
     TOC_LEVEL_MIN, UI_FONT_MAX, UI_FONT_MIN, WIDTH_MAX, WIDTH_MIN, WIDTH_PRESETS,
 };
 use crate::view::themes::{lighten, FontChoice, Palette};
-use crate::view::widgets::plain_galley;
+use crate::view::widgets::{plain_galley, wrapped_galley};
 
 /// Горизонтальный отступ содержимого от краёв панели.
 const PAD: f32 = 16.0;
@@ -144,6 +144,21 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> boo
     if s.text_width != before_w {
         s.fit_width = false;
     }
+
+    // Выравнивание текста (абзацы/заголовки/цитаты/списки).
+    pills_row(
+        ui,
+        "text_align",
+        t(lang, "st_align"),
+        em,
+        pal,
+        &[
+            (t(lang, "st_align_left"), TextAlign::Left),
+            (t(lang, "st_align_center"), TextAlign::Center),
+            (t(lang, "st_align_justify"), TextAlign::Justify),
+        ],
+        &mut s.text_align,
+    );
 
     let mut v = s.letter_spacing;
     slider_row(
@@ -289,9 +304,14 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> boo
         &mut s.toc_max_level,
     );
 
+    // Ассоциация файлов (HKCU, без установщика — PLAN §9): состояние — в
+    // реестре (читается каждый кадр, дёшево), клик по чекбоксу действует сразу.
+    ui.add_space(8.0);
+    assoc_row(ui, t(lang, "st_assoc"), em, pal, lang);
+
     // Сброс настроек + перезапуск приложения (владелец тестирует: новый
     // процесс открывает те же вкладки).
-    ui.add_space(22.0);
+    ui.add_space(14.0);
     hline(ui, pal);
     ui.add_space(12.0);
     let mut restart = false;
@@ -307,26 +327,6 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> boo
         ui.add_space(10.0);
         if flat_bordered_button(ui, t(lang, "st_restart"), em, pal) {
             restart = true;
-        }
-        // Ассоциация .md (HKCU, без установщика — PLAN §9): надпись отражает
-        // текущее состояние; реестр читается каждый кадр (дёшево).
-        ui.add_space(10.0);
-        let associated = crate::associate::is_associated();
-        let label = if associated {
-            t(lang, "st_assoc_remove")
-        } else {
-            t(lang, "st_assoc_add")
-        };
-        if flat_bordered_button(ui, label, em, pal) {
-            let res = if associated {
-                crate::associate::remove()
-            } else {
-                crate::associate::associate()
-            };
-            if let Err(e) = res {
-                log::warn!("ассоциация .md: {e}");
-            }
-            ui.ctx().request_repaint();
         }
     });
 
@@ -486,6 +486,219 @@ fn pills_row<T: Copy + PartialEq>(
         }
     });
     ui.add_space(6.0);
+}
+
+/// Строка «подпись слева, чекбоксы .md/.txt справа»: ассоциация расширений
+/// с DarkTechMD (HKCU). Состояние — системное (реестр), не в settings.json.
+/// Если Windows назначила расширение другому приложению (UserChoice —
+/// защищён, программно не сменить), под чекбоксами — подсказка и кнопка
+/// открытия системных настроек.
+fn assoc_row(ui: &mut Ui, label: &str, em: f32, pal: &Palette, lang: Lang) {
+    let row_h = em + 14.0;
+    let lg = plain_galley(ui, label, em, pal.muted);
+    let labels: Vec<_> = crate::associate::EXTENSIONS
+        .iter()
+        .map(|e| plain_galley(ui, &format!(".{e}"), em, pal.fg))
+        .collect();
+    let box_s = em * 0.95;
+    let item_w = |g: &Arc<Galley>| box_s + 6.0 + g.size().x;
+    let gap = 18.0;
+    let total: f32 = labels.iter().map(|g| item_w(g) + gap).sum::<f32>() - gap;
+
+    alloc_row(ui, row_h, |ui, row| {
+        let painter = ui.painter().clone();
+        painter.galley(
+            pos2(row.min.x + PAD, row.center().y - lg.size().y * 0.5),
+            lg,
+            pal.muted,
+        );
+        let mut x = row.max.x - PAD - total;
+        for (i, g) in labels.iter().enumerate() {
+            let ext = crate::associate::EXTENSIONS[i];
+            let checked = crate::associate::is_associated(ext);
+            let hit = Rect::from_min_size(pos2(x, row.min.y), vec2(item_w(g), row_h));
+            let resp = ui.interact(
+                hit,
+                ui.scope_id().with(("assoc", ext)),
+                Sense::click(),
+            );
+            let hovered = resp.hovered();
+
+            // Чекбокс (плоский, как task list в документе) + подпись.
+            let box_rect =
+                Rect::from_min_size(pos2(x, row.center().y - box_s * 0.5), vec2(box_s, box_s));
+            let stroke_color = if checked || hovered {
+                pal.link
+            } else {
+                pal.muted
+            };
+            painter.rect(
+                box_rect,
+                CornerRadius::same(0),
+                if checked { pal.link } else { eframe::egui::Color32::TRANSPARENT },
+                Stroke::new(1.5, stroke_color),
+                eframe::egui::StrokeKind::Middle,
+            );
+            if checked {
+                let c = box_rect.center();
+                let s = box_s * 0.28;
+                painter.line_segment(
+                    [pos2(c.x - s, c.y + s * 0.2), pos2(c.x - s * 0.25, c.y + s * 0.8)],
+                    Stroke::new(2.0, eframe::egui::Color32::WHITE),
+                );
+                painter.line_segment(
+                    [pos2(c.x - s * 0.25, c.y + s * 0.8), pos2(c.x + s, c.y - s * 0.6)],
+                    Stroke::new(2.0, eframe::egui::Color32::WHITE),
+                );
+            }
+            painter.galley_with_override_text_color(
+                pos2(x + box_s + 6.0, row.center().y - g.size().y * 0.5),
+                g.clone(),
+                if hovered { pal.fg } else { pal.muted },
+            );
+
+            if hovered {
+                ui.ctx()
+                    .set_cursor_icon(eframe::egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                let res = if checked {
+                    crate::associate::remove(ext)
+                } else {
+                    crate::associate::associate(ext)
+                };
+                if let Err(e) = res {
+                    log::warn!("ассоциация .{ext}: {e}");
+                }
+                ui.ctx().request_repaint();
+            }
+            x += item_w(g) + gap;
+        }
+    });
+
+    // Включённые расширения, назначенные системой другим приложениям:
+    // наша ассоциация записана, но двойной клик открывает «их». Подсказка
+    // ОДНА на все такие расширения (текст и кнопка почти не различаются):
+    // «.md», «.txt» → «.md и .txt».
+    let hijacked: Vec<&str> = crate::associate::EXTENSIONS
+        .iter()
+        .copied()
+        .filter(|ext| crate::associate::is_associated(ext))
+        .filter(|ext| crate::associate::foreign_default(ext).is_some())
+        .collect();
+    if !hijacked.is_empty() {
+        ui.add_space(2.0);
+        let names: Vec<String> = hijacked.iter().map(|e| format!(".{e}")).collect();
+        let exts = match names.as_slice() {
+            [] => String::new(), // недостижимо: hijacked непуст
+            [one] => one.clone(),
+            [init @ .., last] => {
+                // Два — без запятой («.md и .txt»), больше — через запятую.
+                let head = if init.len() == 1 {
+                    init[0].clone()
+                } else {
+                    init.join(", ")
+                };
+                format!("{head} {} {}", t(lang, "st_and"), last)
+            }
+        };
+        let key = if hijacked.len() == 1 {
+            "st_assoc_hijack"
+        } else {
+            "st_assoc_hijack_multi"
+        };
+        let text = t(lang, key).replace("{ext}", &exts);
+        let size = em * 0.85;
+        let btn_g = plain_galley(ui, t(lang, "st_assoc_open"), size, pal.muted);
+        let btn_size = btn_g.size() + vec2(em * 1.2, em * 0.6);
+        // Подсказка бывает длиннее панели: не влезает с кнопкой в строку —
+        // перенос по словам на всю ширину, кнопка уходит строкой ниже.
+        let avail = (ui.available_width() - PAD * 2.0).max(80.0);
+        let mut note = plain_galley(ui, &text, size, pal.muted);
+        let inline = note.size().x + 10.0 + btn_size.x <= avail;
+        if !inline {
+            note = wrapped_galley(ui, &text, size, pal.muted, avail);
+        }
+        let note_h = if inline {
+            note.size().y.max(btn_size.y).max(em * 0.9)
+        } else {
+            note.size().y
+        };
+        let note_w = note.size().x;
+        alloc_row(ui, note_h, |ui, row| {
+            let painter = ui.painter().clone();
+            painter.galley(
+                pos2(row.min.x + PAD, row.center().y - note.size().y * 0.5),
+                note,
+                pal.muted,
+            );
+            if inline {
+                assoc_open_btn(
+                    ui,
+                    Rect::from_min_size(
+                        pos2(
+                            row.min.x + PAD + note_w + 10.0,
+                            row.center().y - btn_size.y * 0.5,
+                        ),
+                        btn_size,
+                    ),
+                    &btn_g,
+                    pal,
+                    &exts,
+                );
+            }
+        });
+        if !inline {
+            ui.add_space(4.0);
+            alloc_row(ui, btn_size.y.max(em * 0.9), |ui, row| {
+                assoc_open_btn(
+                    ui,
+                    Rect::from_min_size(
+                        pos2(row.min.x + PAD, row.center().y - btn_size.y * 0.5),
+                        btn_size,
+                    ),
+                    &btn_g,
+                    pal,
+                    &exts,
+                );
+            });
+        }
+    }
+    ui.add_space(6.0);
+}
+
+/// Кнопка «Открыть настройки Windows» под подсказкой ассоциации: плоская
+/// рамка, заливка при наведении; клик — системные «Приложения по умолчанию»
+/// (UserChoice защищён подписью — программно сменить нельзя).
+fn assoc_open_btn(ui: &mut Ui, rect: Rect, g: &Arc<Galley>, pal: &Palette, ext: &str) {
+    let resp = ui.interact(rect, ui.scope_id().with(("assoc_open", ext)), Sense::click());
+    let hovered = resp.hovered();
+    let painter = ui.painter().clone();
+    painter.rect(
+        rect,
+        CornerRadius::same(0),
+        if hovered {
+            lighten(pal.bg, 0.10)
+        } else {
+            eframe::egui::Color32::TRANSPARENT
+        },
+        Stroke::new(1.0, if hovered { pal.muted } else { pal.border }),
+        eframe::egui::StrokeKind::Middle,
+    );
+    painter.galley_with_override_text_color(
+        rect.center() - g.size() * 0.5,
+        g.clone(),
+        if hovered { pal.fg } else { pal.muted },
+    );
+    if hovered {
+        ui.ctx()
+            .set_cursor_icon(eframe::egui::CursorIcon::PointingHand);
+    }
+    if resp.clicked() {
+        let _ = std::process::Command::new("explorer")
+            .arg("ms-settings:defaultapps")
+            .spawn();
+    }
 }
 
 /// Строка «подпись слева, слайдер + значение справа». Слайдер тянется на всё

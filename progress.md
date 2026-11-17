@@ -278,6 +278,36 @@ cargo run -- temp/demo.md                 # запуск с демо-файло�
 - README.md: фичи, бюджеты, сборка `cargo build --release`, тесты, хоткеи.
 - Версия пакета 1.0.0; release exe 13.9 МБ → `bin/DarkTechMD.exe`.
 
+**После релиза v1 (правки владельца, раунды 30–32):**
+- Фикс ширины панели настроек: ряд из 3 кнопок внизу (~472px) был шире
+  exact_size панели (430) — `ui.horizontal` НЕ переносится, контент обрезался
+  краем окна. Регрессионный тест `tests/settings_geom.rs` (min_rect ≤
+  exact_size при UI-шрифте 14 и 18). Кнопка ассоциации → ЧЕКБОКСЫ `.md`/`.txt`
+  в строке «Ассоциация файлов» (состояние — реестр HKCU каждый кадр);
+  `associate.rs` обобщён по EXTENSIONS, ProgID `DarkTechMD.{ext}`.
+- Чужой UserChoice (HKCU FileExts, ПОДПИСАН хэшем — программно не сменить,
+  защита ОС): для включённых расширений с чужим выбором — ОДНА подсказка на
+  все («Для .md и .txt Windows назначила другие приложения…», перенос по
+  словам если не влезает) + кнопка «Открыть настройки Windows»
+  (ms-settings:defaultapps). `associate::foreign_default(ext)`.
+- Открытие любых текстовых файлов: диалог (md/markdown/mdown/txt/text + все
+  файлы), drag&drop без фильтра (бинарник → штатный «не UTF-8»), локальные
+  .txt-ссылки — вкладкой; «Сохранить как…» — фильтр по расширению исходника.
+- Окно создаётся `visible(false)`, первый кадр шлёт `SetTheme(эффективная)`
+  + `Visible(true)` — заголовок ОКНА сразу в теме программы (ViewportBuilder
+  темы не имеет, SystemDefault оставлял светлый заголовок на тёмной системе).
+- Опция «Выравнивание» (Слева/По центру/По ширине) для текстовых блоков
+  (абзац/заголовок/цитата/пункт; таблицы/код/маркеры — нет), в LayoutKey;
+  justify растягивает перенесённые строки (последняя — нет).
+- Тумблер темы в статус-баре (первым; подпись = эффективная тема, «Авто»
+  заменяется явной); статус-бар на всю ширину окна (после таб-бара, до
+  боковых панелей), панели навигации кончаются над ним.
+- Фиксы раунда 32: центрированный текст уезжал за левый край — ГРАБЛЯ
+  halign=Center (см. §4); I-beam над статус-баром — `end_frame` теперь
+  получает видимый вьюпорт скролла (`vis`), а не `ui.max_rect()` (контент
+  всей высоты документа накрывал бар/таб-бар, клик по бару начинал
+  выделение документа).
+
 
 - `src/settings/` — serde-модель (camelCase, `#[serde(default)]`, повреждённый →
   дефолты молча) + store (`%APPDATA%\DarkTechMD\settings.json`, атомарно tmp+rename,
@@ -431,6 +461,12 @@ assets/icon.ico        иконка exe (winres); генератор — assets/
 - `TextFormat.extra_letter_spacing`, `TextFormat.line_height: Option<f32>` — есть.
 - `LayoutSection.byte_range` — `ByteIndex(..)` (не usize).
 - Галереи: `painter.layout_job(job) -> Arc<Galley>`; хит-тест: `galley.pos_from_cursor(CCursor::new(char_idx))`.
+- ГАЛЛЕЙ С `job.halign = Align::Center`: строки лежат в [-w/2, +w/2] вокруг
+  нуля — `Galley::rect.center() == 0.0` (у LEFT `rect.left() == 0`; Label
+  кладёт такой галлей в `center_top`). Красить/хит-тестить от «начала
+  координат» = визуальный `rect.min − galley.rect.min`; покраска от левого
+  края уводит текст влево на полширины. `cursor_from_pos`/`pos_from_cursor`
+  в этих координатах (x бывает отрицательным).
 - Скроллбар: `style.spacing.scroll = ScrollStyle { floating: false, bar_width: 20.0, … }`,
   цвета: трек = `visuals.extreme_bg_color`, ручка = `visuals.widgets.{inactive,hovered}.bg_fill`,
   углы = `widgets.*.corner_radius`. `ctx.all_styles_mut(...)` (не `set_style`).

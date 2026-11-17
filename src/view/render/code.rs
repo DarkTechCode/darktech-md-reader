@@ -128,6 +128,8 @@ pub fn render_code(
                         wrap: f32::INFINITY,
                         line_height: prep.line_h,
                         letter_spacing: env.typo.letter_spacing,
+                        halign: eframe::egui::Align::LEFT,
+                        justify: false,
                     };
                     // Подсветка синтаксиса (кэш по видимому срезу) или plain.
                     let job = if env.code_highlight {
@@ -182,6 +184,8 @@ fn plain_code_job(slice: &str, prep: &CodePrep, env: &Env) -> LayoutJob {
         wrap: f32::INFINITY,
         line_height: prep.line_h,
         letter_spacing: env.typo.letter_spacing,
+        halign: eframe::egui::Align::LEFT,
+        justify: false,
     };
     spec.job(&[plain_span(slice)], env.pal, None, "")
 }

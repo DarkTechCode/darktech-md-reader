@@ -575,6 +575,7 @@ mod tests {
                 lang: crate::i18n::Lang::Ru,
                 code_nums: false,
                 table_scroll: true,
+                text_align: crate::settings::model::TextAlign::Left,
             },
         );
         assert_eq!(initial_hit(&hits, &layout, 0.0), 0);

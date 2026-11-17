@@ -62,9 +62,16 @@ pub struct Region {
 }
 
 impl Region {
+    /// Начало координат галлея на экране: у halign=Center строки лежат в
+    /// [-w/2, +w/2] вокруг нуля (Label egui красит такой галлей от center_top),
+    /// поэтому rect хранит ВИЗУАЛЬНЫЕ границы, а не позицию (0,0) галлея.
+    pub fn origin(&self) -> Pos2 {
+        self.rect.min - self.galley.rect.min.to_vec2()
+    }
+
     /// Позиция под курсором (курсор клампится к тексту галлея).
     pub fn hit(&self, pos: Pos2) -> SelPos {
-        let local = self.galley.cursor_from_pos(pos - self.rect.min);
+        let local = self.galley.cursor_from_pos(pos - self.origin());
         SelPos {
             block: self.block,
             sub: self.sub,
@@ -490,7 +497,7 @@ fn link_at(doc: &Doc, regions: &[Region], pos: Pos2) -> Option<String> {
             .galley
             .pos_from_cursor(CCursor::new(cs))
             .union(r.galley.pos_from_cursor(CCursor::new(ce)))
-            .translate(r.rect.min.to_vec2());
+            .translate(r.origin().to_vec2());
         if rect.contains(pos) {
             return Some(url.to_string());
         }

@@ -33,6 +33,10 @@ pub struct Palette {
     pub table_head_bg: Color32,
     /// Выделение (поиск/selection).
     pub selection: Color32,
+    /// Подсветка попаданий поиска: обычное / текущее + цвет текста на них.
+    pub find_hit: Color32,
+    pub find_cur: Color32,
+    pub find_text: Color32,
     /// Цвета GFM alerts (полоса + заголовок).
     pub alert_note: Color32,
     pub alert_tip: Color32,
@@ -65,6 +69,9 @@ pub const DARK: Palette = Palette {
     quote_bg: rgb(31, 31, 35),
     table_head_bg: rgb(34, 34, 38),
     selection: rgb(50, 65, 110),
+    find_hit: rgb(150, 120, 32),
+    find_cur: rgb(255, 176, 32),
+    find_text: rgb(26, 23, 10),
     alert_note: rgb(68, 147, 248),
     alert_tip: rgb(63, 185, 80),
     alert_important: rgb(171, 125, 248),
@@ -90,6 +97,9 @@ pub const LIGHT: Palette = Palette {
     quote_bg: rgb(245, 244, 240),
     table_head_bg: rgb(241, 240, 236),
     selection: rgb(190, 205, 245),
+    find_hit: rgb(255, 222, 96),
+    find_cur: rgb(255, 166, 64),
+    find_text: rgb(43, 34, 6),
     alert_note: rgb(31, 111, 235),
     alert_tip: rgb(26, 127, 55),
     alert_important: rgb(134, 74, 224),

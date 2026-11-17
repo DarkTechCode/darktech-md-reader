@@ -10,6 +10,7 @@ use eframe::egui::{
 use crate::layout::{measure, LayoutKey, LayoutState};
 use crate::md::blocks::Doc;
 
+use super::find::{self, FindState};
 use super::nav;
 use super::render;
 use super::selection::{self, SelFrame, SelectionState};
@@ -51,6 +52,7 @@ pub fn show(
     env: &Env,
     tab_key: u64,
     sel: &mut SelectionState,
+    find: &FindState,
 ) -> Vec<DocEvent> {
     let mut events = Vec::new();
     // Тот же id, что у ScrollArea (make_persistent_id = scope_id.with(salt)).
@@ -132,9 +134,18 @@ pub fn show(
         let side = ((avail - col) / 2.0).max(0.0).floor();
         let x0 = origin.x + side;
         let vis = viewport.translate(origin.to_vec2());
-        let i0 = layout
-            .visible_range(viewport.min.y - OVERSCAN, viewport.max.y + OVERSCAN)
-            .start;
+        let vr = layout.visible_range(viewport.min.y - OVERSCAN, viewport.max.y + OVERSCAN);
+        let i0 = vr.start;
+
+        // Попадания поиска — только видимых блоков (список отсортирован).
+        let empty: &[find::Hit] = &[];
+        let (find_hits, find_current) = if find.open && !find.hits.is_empty() {
+            let a = find.hits.partition_point(|h| h.block < vr.start);
+            let b = find.hits.partition_point(|h| h.block < vr.end);
+            (&find.hits[a..b], find.cur_hit())
+        } else {
+            (empty, None)
+        };
 
         // Собственное выделение: области регистрируются при отрисовке,
         // мышь обрабатывается после (драг над областью — прямо в place_text).
@@ -143,10 +154,14 @@ pub fn show(
             regions: Vec::new(),
             pointer: ui.input(|i| i.pointer.interact_pos()),
             link_hover: false,
+            find_hits,
+            find_current,
+            // Попап поиска (прошлый кадр) глушит выделение под собой.
+            blocked: find.open.then_some(find.popup_rect).flatten(),
         };
 
         let mut y = origin.y + TOP_PAD + layout.offset(i0);
-        for i in layout.visible_range(viewport.min.y - OVERSCAN, viewport.max.y + OVERSCAN) {
+        for i in vr {
             let block = &doc.blocks[i];
             if layout.prepared(i).is_none() {
                 let (p, h) = measure::measure_block(ui, env, col, block);
@@ -172,6 +187,7 @@ pub fn show(
             frame.sel,
             frame.link_hover,
             &mut events,
+            frame.blocked,
         );
         // Живая статистика выделения (гигантские диапазоны — по отпусканию).
         frame.sel.recompute_stats_if_due(doc);

@@ -360,7 +360,7 @@ fn clamp_pos(regions: &[Region], pos: Pos2) -> (usize, SelPos) {
 
 /// Кадровый контекст выделения: строится в doc_view, проходит через все
 /// place_text (регистрация областей, драг под курсором — в момент отрисовки,
-/// чтобы подсветка не отставала).
+/// чтобы подсветка не отставала). Попадания поиска — только видимых блоков.
 pub struct SelFrame<'a> {
     pub sel: &'a mut SelectionState,
     pub regions: Vec<Region>,
@@ -368,6 +368,13 @@ pub struct SelFrame<'a> {
     pub pointer: Option<Pos2>,
     /// Курсор над ссылкой (ставит place_text) — глушит I-beam.
     pub link_hover: bool,
+    /// Попадания поиска в видимых блоках (place_text красит как выделение).
+    pub find_hits: &'a [super::find::Hit],
+    /// Текущее попадание (яркая подсветка).
+    pub find_current: Option<super::find::Hit>,
+    /// Экранный прямоугольник, где указатель НЕ документ (попап поиска) —
+    /// нажатия/драги под ним не трогают выделение документа.
+    pub blocked: Option<Rect>,
 }
 
 /// Обработка мыши за кадр: вызывается из doc_view после отрисовки блоков
@@ -381,13 +388,16 @@ pub fn end_frame(
     sel: &mut SelectionState,
     link_hover: bool,
     events: &mut Vec<DocEvent>,
+    blocked: Option<Rect>,
 ) {
     let pressed = ui.input(|i| i.pointer.primary_pressed());
     let down = ui.input(|i| i.pointer.primary_down());
     let released = ui.input(|i| i.pointer.primary_released());
     let secondary = ui.input(|i| i.pointer.secondary_clicked());
     let pos = ui.input(|i| i.pointer.interact_pos());
-    let in_area = pos.is_some_and(|p| area.contains(p));
+    let in_area = pos.is_some_and(|p| {
+        area.contains(p) && !blocked.is_some_and(|b| b.contains(p))
+    });
 
     // Нажатие вне документа (таб-бар, панели) — прерываем начатый драг,
     // чтобы отпускание над документом не открывало ссылку «из ниоткуда».

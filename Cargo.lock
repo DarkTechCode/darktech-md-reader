@@ -626,6 +626,7 @@ dependencies = [
  "eframe",
  "env_logger",
  "log",
+ "memchr",
  "pulldown-cmark",
  "rfd",
  "serde",

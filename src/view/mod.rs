@@ -1,6 +1,8 @@
 //! Отрисовка документа.
 
 pub mod doc_view;
+pub mod find;
+pub mod find_bar;
 pub mod minimap;
 pub mod nav;
 pub mod outline;

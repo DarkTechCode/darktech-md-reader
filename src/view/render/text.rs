@@ -14,6 +14,7 @@ use crate::md::blocks::Span;
 
 use super::misc::draw_checkbox;
 use super::super::doc_view::DocEvent;
+use super::super::find::Hit;
 use super::super::selection::{Region, SelFrame};
 use super::super::themes::Palette;
 use super::super::Env;
@@ -153,6 +154,18 @@ pub fn place_text(ui: &mut Ui, pal: &Palette, p: Place<'_>, f: &mut SelFrame) ->
         Some((url, _)) => ui.painter().layout_job(p.spec.job(p.spans, pal, Some(url))),
         None => p.galley.clone(),
     };
+    if !f.find_hits.is_empty() {
+        paint_find_hits(
+            ui,
+            &mut galley,
+            p.block,
+            p.sub,
+            p.base_ch,
+            f.find_hits,
+            f.find_current,
+            pal,
+        );
+    }
     if let Some(range) = f.sel.region_range(p.block, p.sub) {
         let a = galley.clamp_cursor(&CCursor::new(range.start.saturating_sub(p.base_ch)));
         let b = galley.clamp_cursor(&CCursor::new(range.end.saturating_sub(p.base_ch)));
@@ -181,6 +194,49 @@ pub fn place_text(ui: &mut Ui, pal: &Palette, p: Place<'_>, f: &mut SelFrame) ->
         }
     }
     events
+}
+
+/// Подсветка попаданий поиска в галлей под-области: та же механика, что у
+/// выделения (paint_text_selection красит строки за глифами и перекрашивает
+/// текст), но с цветами поиска; текущее попадание — ярче. Список уже отфильтрован
+/// по видимым блокам; попадания отсортированы — находим свою под-область.
+fn paint_find_hits(
+    ui: &Ui,
+    galley: &mut Arc<Galley>,
+    block: usize,
+    sub: usize,
+    base_ch: usize,
+    hits: &[Hit],
+    current: Option<Hit>,
+    pal: &Palette,
+) {
+    let mut vis_plain = ui.visuals().clone();
+    vis_plain.selection.bg_fill = pal.find_hit;
+    vis_plain.selection.stroke.color = pal.find_text;
+    let mut vis_cur = ui.visuals().clone();
+    vis_cur.selection.bg_fill = pal.find_cur;
+    vis_cur.selection.stroke.color = pal.find_text;
+
+    let mut i = hits.partition_point(|h| (h.block, h.sub) < (block, sub));
+    while i < hits.len() && (hits[i].block, hits[i].sub) == (block, sub) {
+        let h = hits[i];
+        let a = galley.clamp_cursor(&CCursor::new(h.start.saturating_sub(base_ch)));
+        let b = galley.clamp_cursor(&CCursor::new(h.end.saturating_sub(base_ch)));
+        if a.index < b.index {
+            let vis = if Some(h) == current {
+                &vis_cur
+            } else {
+                &vis_plain
+            };
+            egui::text_selection::visuals::paint_text_selection(
+                galley,
+                vis,
+                &CCursorRange::two(a, b),
+                None,
+            );
+        }
+        i += 1;
+    }
 }
 
 /// Компактная подсказка с URL у курсора.

@@ -21,7 +21,8 @@ use crate::md::parser::{self, ParseMsg};
 use crate::settings::model::{self, PanelMode, SettingsData, Side, ThemeMode, WIDTH_PRESETS};
 use crate::settings::store;
 use crate::view::selection::{self, SelStats, SelectionState};
-use crate::view::{doc_view, minimap, nav, outline, settings_panel, themes, welcome, Env};
+use crate::view::themes::Typo;
+use crate::view::{doc_view, find, find_bar, minimap, nav, outline, settings_panel, themes, welcome, Env};
 use crate::fonts;
 use eframe::egui::Pos2;
 
@@ -76,6 +77,8 @@ pub struct Tab {
     pub toc: outline::TocState,
     /// Собственное выделение текста (переживает виртуальный скролл).
     pub selection: SelectionState,
+    /// Поиск по документу этой вкладки.
+    pub find: find::FindState,
 }
 
 pub enum TabState {
@@ -98,6 +101,7 @@ impl Tab {
             layout: LayoutState::default(),
             toc: outline::TocState::default(),
             selection: SelectionState::default(),
+            find: find::FindState::default(),
         }
     }
 
@@ -124,6 +128,7 @@ impl Tab {
             layout: LayoutState::default(),
             toc: outline::TocState::default(),
             selection: SelectionState::default(),
+            find: find::FindState::default(),
         }
     }
 
@@ -276,6 +281,63 @@ impl App {
     fn active_doc(&self) -> Option<(&Doc, u64)> {
         let tab = self.tabs.get(self.active)?;
         Some((state_doc(&tab.state)?, tab.id))
+    }
+
+    /// Шаг по попаданиям поиска (Enter/F3/кнопки): вперёд/назад, по кругу;
+    /// `open_bar` — открыть панель, если закрыта (F3).
+    fn find_step(&mut self, ctx: &Context, back: bool, open_bar: bool) {
+        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        if state_doc(&tab.state).is_none() {
+            return;
+        }
+        if !tab.find.open {
+            if !open_bar {
+                return;
+            }
+            tab.find.open = true;
+        }
+        let Some(hit) = tab.find.step(back) else {
+            return;
+        };
+        let typo = self.settings.typo();
+        let (tab_id, layout) = (tab.id, &tab.layout);
+        let doc = state_doc(&tab.state).expect("документ проверен выше");
+        request_scroll_to_hit(ctx, tab_id, doc, layout, &typo, hit);
+    }
+
+    /// Прокачка поиска всех вкладок: (пере)запуск при изменившемся запросе,
+    /// приём пакетов, выбор стартового попадания (активная вкладка).
+    fn pump_find(&mut self, ctx: &Context) {
+        let typo = self.settings.typo();
+        for ti in 0..self.tabs.len() {
+            let tab = &mut self.tabs[ti];
+            // Запрос стёрли — гасим результаты (подсветки быть не должно).
+            if tab.find.query.is_empty() && tab.find.started().is_some() {
+                tab.find.reset_results();
+            }
+            // (Пере)запуск: панель открыта, документ готов, запрос изменился.
+            if tab.find.open
+                && !tab.find.query.is_empty()
+                && tab.find.started() != Some(tab.find.query.as_str())
+                && let TabState::Ready(arc) = &tab.state
+            {
+                tab.find.restart(arc);
+            }
+            let p = tab.find.pump();
+            if p.changed {
+                ctx.request_repaint();
+            }
+            if p.landed && ti == self.active {
+                // Первые попадания запроса: стартуем с первого видимого/ниже.
+                let off = nav::metrics(ctx, tab.id).map_or(0.0, |m| m.offset);
+                tab.find.current = find::initial_hit(&tab.find.hits, &tab.layout, off);
+                if let Some(hit) = tab.find.cur_hit() {
+                    let (tab_id, layout) = (tab.id, &tab.layout);
+                    let doc = state_doc(&tab.state).expect("searching tab has doc");
+                    request_scroll_to_hit(ctx, tab_id, doc, layout, &typo, hit);
+                }
+            }
+        }
     }
 
     /// Видимость оглавления по режиму (Авто — при ≥3 заголовках).
@@ -480,20 +542,27 @@ impl App {
             self.close_tab(self.active);
         }
 
-        // Ctrl+Tab / Ctrl+Shift+Tab — переключение вкладок.
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab)) {
-            self.active = next_tab(self.active, self.tabs.len(), false);
-        } else if ctx.input_mut(|i| {
+        // Ctrl+Tab / Ctrl+Shift+Tab — переключение вкладок. Shift-вариант
+        // проверяем ПЕРВЫМ: consume_key матчит лишний Shift (matches_logically).
+        if ctx.input_mut(|i| {
             i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab)
         }) {
             self.active = next_tab(self.active, self.tabs.len(), true);
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab)) {
+            self.active = next_tab(self.active, self.tabs.len(), false);
         }
 
-        // Esc — закрыть панель настроек, иначе — снять выделение и контекст-меню.
+        // Esc — закрыть панель настроек, иначе поиск, иначе — снять выделение
+        // и контекст-меню.
         if self.show_settings {
             if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
                 self.show_settings = false;
             }
+        } else if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab.find.open
+            && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))
+        {
+            tab.find.close();
         } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             self.ctx_menu = None;
             if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -501,8 +570,87 @@ impl App {
             }
         }
 
-        // Ctrl+A — выделить весь документ (виртуально, без раскладки).
-        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::A)) {
+        // Ctrl+F — открыть поиск активной вкладки (только с документом).
+        if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::F)) {
+            if let Some(tab) = self.tabs.get_mut(self.active)
+                && state_doc(&tab.state).is_some()
+            {
+                tab.find.open = true;
+            }
+        }
+
+        // Поле поиска открыто: печать/вставка и правки уходят в запрос
+        // (поле своё — TextEdit egui не используем, ввод ловим из очереди).
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && tab.find.open
+        {
+            // Event::Text — печать; Event::Paste — Ctrl+V (egui-winit
+            // превращает его в синтетическое событие, как Copy).
+            let mut insert = String::new();
+            ctx.input_mut(|i| {
+                i.events.retain(|e| match e {
+                    egui::Event::Text(s) | egui::Event::Paste(s) => {
+                        insert.push_str(s);
+                        false
+                    }
+                    _ => true,
+                });
+            });
+            if !insert.is_empty() {
+                tab.find.insert_text(&insert);
+            }
+            // Backspace/Delete (Ctrl — по словам), стрелки, Home/End.
+            if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Backspace)) {
+                tab.find.backspace(true);
+            } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Backspace)) {
+                tab.find.backspace(false);
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Delete)) {
+                tab.find.delete_ahead(true);
+            } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete)) {
+                tab.find.delete_ahead(false);
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::ArrowLeft)) {
+                tab.find.caret_left(true);
+            } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowLeft)) {
+                tab.find.caret_left(false);
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::ArrowRight)) {
+                tab.find.caret_right(true);
+            } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowRight)) {
+                tab.find.caret_right(false);
+            }
+            if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Home)) {
+                tab.find.caret_home();
+            } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::End)) {
+                tab.find.caret_end();
+            }
+        }
+
+        // F3 / Shift+F3 — следующее/предыдущее попадание (открывает панель);
+        // Enter / Shift+Enter — то же при открытой панели.
+        if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F3)) {
+            self.find_step(&ctx, true, true);
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F3)) {
+            self.find_step(&ctx, false, true);
+        }
+        if self.tabs.get(self.active).is_some_and(|t| t.find.open) {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Enter)) {
+                self.find_step(&ctx, true, false);
+            } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+                self.find_step(&ctx, false, false);
+            }
+        }
+
+        // Ctrl+A — при открытом поиске выделить запрос, иначе весь документ.
+        let find_open = self.tabs.get(self.active).is_some_and(|t| t.find.open);
+        if find_open {
+            if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::A))
+                && let Some(tab) = self.tabs.get_mut(self.active)
+            {
+                tab.find.select_all_field();
+            }
+        } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::A)) {
             if let Some(tab) = self.tabs.get_mut(self.active)
                 && let Some(doc) = state_doc(&tab.state)
             {
@@ -512,16 +660,41 @@ impl App {
         }
 
         // Ctrl+C — выделение как plain text (клипборд — только из фона).
-        // egui-winit перехватывает Ctrl+C ДО Key-события (is_copy_command →
-        // синтетический Event::Copy, lib.rs egui-winit) — consume_key его не
-        // видит; забираем событие из очереди сами.
-        let copy_pressed = ctx.input_mut(|i| {
+        // egui-winit перехватывает Ctrl+C/X ДО Key-события (is_copy_command →
+        // синтетический Event::Copy/Cut, lib.rs egui-winit) — consume_key их не
+        // видит; забираем события из очереди сами. При открытом поиске копируем
+        // (Ctrl+X — вырезаем) запрос.
+        let mut copy_evt = false;
+        let mut cut_evt = false;
+        ctx.input_mut(|i| {
             let before = i.events.len();
-            i.events.retain(|e| !matches!(e, egui::Event::Copy));
+            i.events.retain(|e| match e {
+                egui::Event::Copy => {
+                    copy_evt = true;
+                    false
+                }
+                egui::Event::Cut => {
+                    cut_evt = true;
+                    false
+                }
+                _ => true,
+            });
             before != i.events.len()
         });
-        if copy_pressed {
-            self.copy_selection();
+        if copy_evt || cut_evt {
+            if find_open {
+                let tab = &mut self.tabs[self.active];
+                if !tab.find.query.is_empty() {
+                    crate::clipboard::copy_in_background(tab.find.query.clone());
+                }
+                if cut_evt {
+                    tab.find.query.clear();
+                    tab.find.caret = 0;
+                    tab.find.reset_results();
+                }
+            } else {
+                self.copy_selection();
+            }
         }
 
         // Ctrl+= / Ctrl+Plus — крупнее, Ctrl+- — мельче, Ctrl+0 — обычный размер.
@@ -601,6 +774,21 @@ fn state_doc(state: &TabState) -> Option<&Doc> {
         TabState::Loading { doc, .. } => Some(doc),
         _ => None,
     }
+}
+
+/// Просьба скролла к попаданию поиска (обрабатывает doc_view ближайшим
+/// кадром): попадание на ~35% высоты вьюпорта сверху.
+fn request_scroll_to_hit(
+    ctx: &Context,
+    tab_id: u64,
+    doc: &Doc,
+    layout: &LayoutState,
+    typo: &Typo,
+    hit: find::Hit,
+) {
+    let y = find::hit_y(doc, layout, typo, hit);
+    let vh = nav::metrics(ctx, tab_id).map_or(400.0, |m| m.viewport_h);
+    nav::request_scroll(ctx, tab_id, nav::ScrollRequest::Y((y - vh * 0.35).max(0.0)));
 }
 
 /// Перезапуск приложения: новый процесс с путями открытых вкладок (для
@@ -689,6 +877,7 @@ impl eframe::App for App {
 
         self.handle_input(&ctx);
         self.pump_tabs(&ctx);
+        self.pump_find(&ctx);
 
         egui::Panel::top("tab_strip")
             .resizable(false)
@@ -830,6 +1019,7 @@ impl eframe::App for App {
                     layout,
                     path,
                     selection,
+                    find,
                     ..
                 } = tab;
                 match state {
@@ -843,11 +1033,11 @@ impl eframe::App for App {
                         if doc.blocks.is_empty() {
                             show_loading(ui, env.lang, ui_em);
                         } else {
-                            doc_events.extend(doc_view::show(ui, doc, layout, &env, *id, selection));
+                            doc_events.extend(doc_view::show(ui, doc, layout, &env, *id, selection, find));
                         }
                     }
                     TabState::Ready(arc) => {
-                        doc_events.extend(doc_view::show(ui, arc, layout, &env, *id, selection));
+                        doc_events.extend(doc_view::show(ui, arc, layout, &env, *id, selection, find));
                     }
                 }
             });
@@ -868,6 +1058,26 @@ impl eframe::App for App {
 
         // Контекст-меню — поверх всего, после центральной панели.
         self.show_context_menu(&ctx);
+
+        // Попап поиска активной вкладки (Ctrl+F) — плавающий, поверх документа.
+        if self.tabs.get(self.active).is_some_and(|t| {
+            t.find.open && state_doc(&t.state).is_some()
+        }) {
+            let pal = *self.pal();
+            let lang = self.lang();
+            let em = self.settings.ui_font_size as f32;
+            let tab_id = self.tabs[self.active].id;
+            let action =
+                find_bar::show_popup(&ctx, tab_id, &mut self.tabs[self.active].find, &pal, lang, em);
+            match action {
+                Some(find_bar::Action::Next) => self.find_step(&ctx, false, false),
+                Some(find_bar::Action::Prev) => self.find_step(&ctx, true, false),
+                Some(find_bar::Action::Close) => {
+                    self.tabs[self.active].find.close();
+                }
+                None => {}
+            }
+        }
 
         // Настройки изменились → нормализуем и запишем в settings.json
         // (с дебаунсом, чтобы слайдер не жал в диск каждый кадр).

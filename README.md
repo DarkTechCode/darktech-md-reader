@@ -3,7 +3,22 @@
 Быстрая читалка Markdown на Rust + egui. Замена MarkMello: файл 50 МБ
 открывается мгновенно, скролл никогда не дёргается.
 
-Автор: **Dark Wizard** · https://darktech.ru · план: [PLAN.md](PLAN.md)
+![DarkTechMD](darktech-md-reader.png)
+
+Автор: **Dark Wizard** · https://darktech.ru · репозиторий:
+[DarkTechCode/darktech-md-reader](https://github.com/DarkTechCode/darktech-md-reader)
+· план проекта: [PLAN.md](PLAN.md)
+
+## Скачать
+
+**Windows x64** — один exe, без установщика и внешних рантаймов
+(статический CRT, шрифты встроены):
+
+→ [**DarkTechMD.exe**](https://github.com/DarkTechCode/darktech-md-reader/releases/latest/download/DarkTechMD.exe)
+
+Скачал и запустил. Скачивание откроется прямо с GitHub Releases (кнопка
+«Download» / «Скачать» в браузере). Другие версии и исходники — на странице
+[Releases](https://github.com/DarkTechCode/darktech-md-reader/releases).
 
 ## Возможности
 
@@ -26,14 +41,14 @@
   файлы, геометрия окна.
 - **Watcher**: файл изменился на диске → перечитка с сохранением позиции
   (debounce 300 мс); файл пропал → баннер «файл недоступен».
-- **Панели**: оглавление (виртуализованное, текущий раздел подсвечен),
-  миникарта-скелет, статус-бар (слова, время чтения, статистика выделения,
-  тумблеры темы и панелей).
+- **Панели**: оглавление (виртуализованное, текущий раздел подсвечен,
+  сторона слева/справа), миникарта-скелет, статус-бар (слова, время чтения,
+  статистика выделения, тумблеры темы и панелей).
 - **Настройки**: тема, RU/EN, шрифты (Serif/Sans/Mono, встроены в exe),
   размер/межстрочный/ширина/межбуквенный/выравнивание, нумерация и подсветка
   кода, «по ширине окна», ассоциация `.md`/`.txt` (HKCU, с подсказкой при
   чужом UserChoice). `%APPDATA%\DarkTechMD\settings.json`.
-- **Один exe** ~14 МБ, статический CRT, без установщика и внешних
+- **Один exe**, статический CRT, без установщика и внешних
   зависимостей; иконка и метаданные вшиты (winres).
 
 ## Сборка
@@ -45,7 +60,8 @@ cargo build --release
 ```
 
 Готовый exe: `target\x86_64-pc-windows-msvc\release\darktech-md.exe`
-(рабочая копия хранится в `bin\DarkTechMD.exe`, вне git).
+(рабочая копия хранится в `bin\DarkTechMD.exe`, вне git). Профиль release —
+`lto = "fat"`, `codegen-units = 1`, `strip = "symbols"`.
 
 Тесты:
 
@@ -69,7 +85,7 @@ cargo run -- temp/demo.md                           # демо-документ
 | Ctrl+1..3 | ширина текста |
 | Средняя кнопка | автоскролл (браузерный) |
 
-## Лицензии шрифтов
+## Лицензия
 
-Шрифты (Inter, Noto Serif, JetBrains Mono) встроены в exe; лицензии OFL —
-в `assets/fonts/OFL-*.txt`.
+Код — [MIT](LICENSE), © Dark Wizard. Шрифты (Inter, Noto Serif, JetBrains
+Mono) встроены в exe; их лицензии OFL — в `assets/fonts/OFL-*.txt`.

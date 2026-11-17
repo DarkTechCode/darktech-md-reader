@@ -314,6 +314,31 @@ cargo run -- temp/demo.md                 # запуск с демо-файло�
   (переключение темы красит заголовок гарантированно). Причины, почему
   команды egui недостаточно — см. §4.
 
+**День чтения (PLAN §10) + публикация v1.0.0 (2026-11-17):**
+- Корпус-тест `tests/reading_corpus.rs` до дня чтения: 17 сложных, но
+  реальных кейсов (BOM/CRLF, setext, слово 120k символов, строка кода 50k,
+  30 цитат, 20 уровней списков, таблица 60 колонок, эмодзи/ZWJ/залго/RTL/CJK,
+  сущности, inline+блочный HTML, автоссылки, сноски, все 5 GFM-алертов,
+  вложенные task list, заголовки из форматирования, пустой файл) — parse +
+  measure ВСЕХ блоков в трёх выравниваниях, все высоты конечны.
+- Находка дня чтения: «Оглавление → сторона Справа = ПУСТАЯ колонка».
+  Корень: внутри `ScrollArea::show_viewport` painter/interact работают в
+  ЭКРАННЫХ координатах, а outline.rs красил строки/хит-тестил/скроллил в
+  КОНТЕНТНЫХ — у левой панели при нулевом отступе списка они совпадают
+  (потому не ловилось), справа строки ложились за клипом панели и вырезались
+  (латентно это же ломало и прокрутку самого списка при offset≠0). Фикс:
+  `origin = ui.cursor().min` в начале замыкания (как doc_view) — покраска,
+  плашка, interact, автоскролл «держать текущий раздел». Регресс-тест
+  `tests/toc_side.rs`: реальный outline::show в последовательности панелей
+  app.rs, сцена владельца (слева → настройки → «справа» → закрыл) + колесо
+  над списком на обеих сторонах; без фикса падает «0 шейпов в [590..850]».
+- Публикация: GitHub https://github.com/DarkTechCode/darktech-md-reader
+  (публичный, MIT — LICENSE), Release v1.0.0 с DarkTechMD.exe (прямая ссылка
+  из README: releases/latest/download/DarkTechMD.exe), README со скриншотом
+  darktech-md-reader.png; GitHub-ссылка в настройках обновлена на репо;
+  Cargo.toml: repository = github, [profile.release] lto="fat",
+  codegen-units=1, strip="symbols" (пересборка на rustc 1.100.0).
+
 
 - `src/settings/` — serde-модель (camelCase, `#[serde(default)]`, повреждённый →
   дефолты молча) + store (`%APPDATA%\DarkTechMD\settings.json`, атомарно tmp+rename,
@@ -412,7 +437,10 @@ src/view/themes.rs     Palette (DARK/LIGHT + fab_*, scroll_thumb), Typo, apply()
                        text_options заморожены: TEXT_GAMMA=0.75, см. §4)
 src/view/nav.rs        связь панелей ↔ doc_view: глобальные ключи, Metrics, ScrollRequest,
                        RestorePos (set/peek/clear), вкл/выкл автоскролла
-src/view/outline.rs    оглавление: виртуализация с переносами (TocState), подсветка текущего
+src/view/outline.rs    оглавление: виртуализация с переносами (TocState), подсветка текущего;
+                       покраска/хит-тест от origin = ui.cursor().min (экранные
+                       координаты внутри show_viewport, см. §4 — работает на любой
+                       стороне панели и при прокрутке списка)
 src/view/minimap.rs    скелет миникарты: полоски по пиксельным рядам, кэш, вьюпорт, драг,
                        колесо
 src/view/find.rs       поиск: Hit, FindState (запрос/каретка/выделение/позиция попапа),
@@ -444,6 +472,11 @@ tests/parse_basic.rs   6 тестов парсера (включая якоря 
 tests/perf_smoke.rs    бюджеты §7: стриминг 20 МБ < 1 с, 1 МБ < 100 мс,
                        LayoutKey-тест; #[ignore] 50 МБ: разбор + память
                        (GetProcessMemoryInfo) + поиск < 300 мс
+tests/settings_geom.rs ширина панели настроек влезает контент (UI-шрифт 14/18)
+tests/reading_corpus.rs корпус «дня чтения»: 17 сложных кейсов реальных файлов,
+                       parse+measure всех блоков в 3 выравниваниях
+tests/toc_side.rs      регрессия: оглавление справа красит строки внутри панели
+                       (сцена смены стороны + прокрутка списка колесом)
 temp/demo.md, temp/documentation.md   ручные файлы проверки (gitignored; demo.md —
                        «все элементы» + строка якорных ссылок, открывается по умолчанию)
 assets/fonts/          *.ttf + OFL-*.txt
@@ -499,6 +532,15 @@ assets/icon.ico        иконка exe (winres); генератор — assets/
   `.vertical_scroll_offset(v)` только в кадрах, где нужен (state читается
   `scroll_area::State::load(ctx, id)`), иначе перебьёт драг. Состояние скролла у
   ScrollArea — персистентное по id (у нас id_salt = ("doc_scroll", tab_key)).
+- ГРАБЛЯ (день чтения, «оглавление справа — пустая колонка»): внутри
+  `show_viewport` painter/`ui.interact`/`scroll_to_rect` работают в ЭКРАННЫХ
+  координатах (content ui = обычный child с max_rect = панель − offset), а
+  второй аргумент замыкания `viewport` — контентный. Красить/хит-тестить от
+  `origin = ui.cursor().min` в начале замыкания: screen = origin + content.
+  Контентные координаты «из коробки» совпадают с экранными ТОЛЬКО у левой
+  панели при offset 0 — справа строки ложатся за клипом и вырезаются, при
+  прокрутке уезжают. Диагностика headless: `ctx.run_ui` → `out.shapes`
+  (Shape::Text, galley.rect + pos) против rect панели — ловится без окна.
 - Галка: не забыть `eframe = { default-features = false, features = ["glow","clipboard","links","default_fonts"] }`.
 - Статический CRT: rustflags живут в `.cargo/config.toml` в секции **[build]** (`rustflags = ["-C","target-feature=+crt-static"]`).
   Секция `[rust]` НЕ существует — cargo молча игнорирует, exe требует VCRUNTIME140.dll (проверять:
@@ -613,12 +655,14 @@ assets/icon.ico        иконка exe (winres); генератор — assets/
   eframe сам переводит в пиксели. `notify` на Windows шлёт ДУБЛИ событий
   (Modify(Data) + Modify(Metadata)) на одну запись — дебаунс обязателен.
 
-## 5. Следующий этап — сравнение с MarkMello на реальных файлах владельца
+## 5. Следующий этап
 
-Все этапы плана (0–7) выполнены. Дальше по PLAN §8: день чтения владельца
-на реальных файлах без фризов; чек-лист готовности v1 — PLAN §10. Хвосты —
-ниже; возможные следующие темы: локальные картинки (img_store decode+LRU),
-сворачивание веток оглавления, автоскролл при драге выделения за экран.
+Все этапы плана (0–7) выполнены, день чтения (PLAN §10) прошёл, v1.0.0
+опубликована: https://github.com/DarkTechCode/darktech-md-reader (Release с
+DarkTechMD.exe, MIT). Проект в режиме сопровождения: правки по фидбеку
+владельца + обновление релиза. Возможные следующие темы: локальные картинки
+(img_store decode+LRU), сворачивание веток оглавления, автоскролл при драге
+выделения за экран, копирование как Markdown/Telegram-Markdown.
 
 ## 6. Известные недоделки/хвосты
 

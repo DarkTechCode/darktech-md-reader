@@ -4,7 +4,7 @@
 //! длинные документы не тормозят. Клик — скролл к разделу; текущий раздел
 //! подсвечен по позиции скролла; список держит его в зоне видимости.
 
-use eframe::egui::{pos2, vec2, CornerRadius, Rect, ScrollArea, Sense, Ui};
+use eframe::egui::{vec2, CornerRadius, Rect, ScrollArea, Sense, Ui};
 
 use crate::layout::LayoutState;
 use crate::md::blocks::Doc;
@@ -119,6 +119,12 @@ pub fn show(
         .id_salt(("toc_scroll", tab))
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, viewport| {
+            // Экранная позиция контента (0,0): панель может быть и справа, и
+            // проскроллена — внутри show_viewport painter/interact работают в
+            // ЭКРАННЫХ координатах (у левой панели при offset 0 контентные
+            // совпадают с экранными — потому баг не ловился; справа строки
+            // красились за клипом панели → «пустая колонка»).
+            let origin = ui.cursor().min;
             let w = ui.max_rect().width();
             state.reset(w, items.len(), base_row_h);
             ui.set_min_height(state.offsets.last().copied().unwrap_or(0.0));
@@ -133,7 +139,7 @@ pub fn show(
                 state.set_height(i, g.size().y + ROW_VPAD * 2.0);
 
                 let row_h = state.heights[i];
-                let rect = Rect::from_min_size(pos2(0.0, y), vec2(w, row_h));
+                let rect = Rect::from_min_size(origin + vec2(0.0, y), vec2(w, row_h));
                 let resp = ui.interact(rect, ui.scope_id().with(("toc_item", i)), Sense::click());
                 let painter = ui.painter().clone();
 
@@ -149,12 +155,12 @@ pub fn show(
                 // Плашка текущего раздела: полоса 2px у левого края.
                 if is_cur {
                     painter.rect_filled(
-                        Rect::from_min_size(pos2(0.0, y + 2.0), vec2(2.0, row_h - 4.0)),
+                        Rect::from_min_size(origin + vec2(0.0, y + 2.0), vec2(2.0, row_h - 4.0)),
                         CornerRadius::same(0),
                         pal.link,
                     );
                 }
-                painter.galley_with_override_text_color(pos2(x, y + ROW_VPAD), g, color);
+                painter.galley_with_override_text_color(origin + vec2(x, y + ROW_VPAD), g, color);
                 if hovered {
                     ui.ctx().set_cursor_icon(eframe::egui::CursorIcon::PointingHand);
                 }
@@ -169,7 +175,7 @@ pub fn show(
                 && c < state.heights.len()
             {
                 let row = Rect::from_min_size(
-                    pos2(0.0, state.offsets[c]),
+                    origin + vec2(0.0, state.offsets[c]),
                     vec2(w, state.heights[c]),
                 );
                 let visible = row.min.y >= viewport.min.y && row.max.y <= viewport.max.y;

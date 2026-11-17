@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2024"
 authors = ["Dark Wizard <github@darktech.ru>"]
 description = "DarkTechMD — быстрая читалка Markdown"
-repository = "https://darktech.ru"
+repository = "https://github.com/DarkTechCode/darktech-md-reader"
 
 [build-dependencies]
 # Иконка/версия/метаданные exe (ресурсы Windows).
@@ -60,4 +60,8 @@ raw-window-handle = "0.6"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
 
 [profile.release]
-lto = "thin"
+# Максимум скорости: полная LTO поверх всех крейтов + один codegen-юнит
+# (лучший инлайн/девиртуализация); strip — минус ~2 МБ символов в exe.
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

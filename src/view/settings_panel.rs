@@ -348,8 +348,8 @@ pub fn show(ui: &mut Ui, s: &mut SettingsData, pal: &Palette, lang: Lang) -> boo
         (t(lang, "st_site"), "https://darktech.ru", "https://darktech.ru"),
         (
             "GitHub",
-            "https://github.com/darkTechCode/",
-            "https://github.com/darkTechCode/",
+            "https://github.com/DarkTechCode/darktech-md-reader/",
+            "https://github.com/DarkTechCode/darktech-md-reader/",
         ),
     ];
     for (label, value, url) in links {
